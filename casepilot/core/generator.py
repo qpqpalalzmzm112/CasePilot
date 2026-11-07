@@ -1,4 +1,4 @@
-"""生成编排：输入文档 → 解析 → LLM 网关生成 → pydantic 校验 → GenerationResult。"""
+"""生成编排：输入文档 → 解析 → LLM 网关生成 → pydantic 校验 → 质量门禁 → GenerationResult。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Optional, Union
 from ..adapters import openapi as openapi_adapter
 from ..adapters import prd as prd_adapter
 from .llm import LLMGateway
+from .quality import check_coverage, format_coverage_report
 from .schema import DocumentProfile, GenerationResult, LLMMode, SourceType, validate_cases
 
 logger = logging.getLogger("casepilot")
@@ -59,6 +60,12 @@ def generate_from_file(
     raw_cases = gateway.generate_raw_cases(profile)
     cases = validate_cases(raw_cases)  # 结构合法率校验，失败抛清晰错误
     logger.info("已生成 %d 条用例（全部通过 pydantic 结构校验）", len(cases))
+
+    # 质量门禁雏形：覆盖维度检查自动执行并打印中文结果，不达标输出中文警告与差距明细
+    coverage = check_coverage(cases)
+    log = logger.warning if not coverage.ok else logger.info
+    for line in format_coverage_report(coverage).splitlines():
+        log(line)
 
     return GenerationResult(
         source=str(p),

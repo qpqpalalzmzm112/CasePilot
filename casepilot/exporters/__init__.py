@@ -1,1 +1,1 @@
-"""导出器包：禅道 Excel（本迭代范围，pytest / Markdown 导出为后续迭代）。"""
+"""导出器包：禅道 Excel、pytest 脚本骨架与 Markdown 用例表。"""

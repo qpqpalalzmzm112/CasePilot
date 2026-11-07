@@ -13,6 +13,20 @@ def _profile() -> DocumentProfile:
     return DocumentProfile(source="a.md", source_type="prd", module="登录模块", flows=["打开登录页"])
 
 
+def _valid_raw_case(title: str = "用例") -> dict:
+    """一条结构合法的用例原始数据（可通过 pydantic 校验）。"""
+    return {
+        "title": title,
+        "precondition": "前置条件",
+        "steps": "1. 步骤一\n2. 步骤二",
+        "expected": "预期结果",
+        "priority": "P0",
+        "category": "功能",
+        "method": "场景法",
+        "module": "登录模块/场景验证",
+    }
+
+
 class FakeResponse:
     """httpx 响应替身。"""
 
@@ -192,11 +206,11 @@ class TestLLMGateway:
     def test_openai_mode_parses_llm_output(self, monkeypatch):
         monkeypatch.setattr(
             "casepilot.core.llm.call_chat_completions",
-            lambda *a, **k: json.dumps([{"title": "t"}], ensure_ascii=False),
+            lambda *a, **k: json.dumps([_valid_raw_case()], ensure_ascii=False),
         )
         gateway = LLMGateway(mode="openai")
         raw = gateway.generate_raw_cases(_profile())
-        assert raw == [{"title": "t"}]
+        assert raw == [_valid_raw_case()]
         assert "OpenAI" in gateway.mode_description
 
     def test_ollama_mode_description(self):
@@ -205,3 +219,98 @@ class TestLLMGateway:
     def test_default_mode_resolution(self, monkeypatch):
         monkeypatch.setattr("casepilot.core.llm.resolve_mode", lambda: "mock")
         assert LLMGateway().mode == "mock"
+
+
+class TestGetMaxRetries:
+    def test_default_is_two(self, monkeypatch):
+        monkeypatch.delenv("CASEPILOT_LLM_MAX_RETRIES", raising=False)
+        assert llm.get_max_retries() == llm.DEFAULT_MAX_RETRIES == 2
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("CASEPILOT_LLM_MAX_RETRIES", "5")
+        assert llm.get_max_retries() == 5
+
+    def test_invalid_value_falls_back(self, monkeypatch):
+        monkeypatch.setenv("CASEPILOT_LLM_MAX_RETRIES", "abc")
+        assert llm.get_max_retries() == 2
+
+    def test_negative_clamped_to_zero(self, monkeypatch):
+        monkeypatch.setenv("CASEPILOT_LLM_MAX_RETRIES", "-1")
+        assert llm.get_max_retries() == 0
+
+
+class TestAutoRetry:
+    """质量门禁：LLM 输出解析 / 校验失败自动重试 ≤2 次（UP-3）。"""
+
+    def _run_with_responses(self, monkeypatch, responses):
+        """按序返回替身响应，记录每次调用。"""
+        calls = {"count": 0, "prompts": []}
+
+        def _fake(base_url, api_key, model, system, user):
+            calls["prompts"].append(user)
+            content = responses[calls["count"]] if calls["count"] < len(responses) else responses[-1]
+            calls["count"] += 1
+            return content
+
+        monkeypatch.setattr("casepilot.core.llm.call_chat_completions", _fake)
+        return calls
+
+    def test_bad_json_then_success_retries_once(self, monkeypatch):
+        monkeypatch.delenv("CASEPILOT_LLM_MAX_RETRIES", raising=False)
+        calls = self._run_with_responses(
+            monkeypatch,
+            ["这不是 JSON", json.dumps([_valid_raw_case()], ensure_ascii=False)],
+        )
+        gateway = LLMGateway(mode="openai")
+        raw = gateway.generate_raw_cases(_profile())
+        assert calls["count"] == 2, "坏 JSON 后应恰好重试 1 次"
+        assert raw == [_valid_raw_case()]
+        # 错误信息回灌提示词
+        assert "自动重试" in calls["prompts"][1]
+        assert "存在问题" in calls["prompts"][1]
+
+    def test_retry_feeds_error_message_back(self, monkeypatch):
+        calls = self._run_with_responses(
+            monkeypatch,
+            ["坏输出", json.dumps([_valid_raw_case()], ensure_ascii=False)],
+        )
+        LLMGateway(mode="openai").generate_raw_cases(_profile())
+        assert "不是合法 JSON" in calls["prompts"][1]  # 具体错误信息回灌
+
+    def test_validation_failure_also_retried(self, monkeypatch):
+        bad_but_json = json.dumps([{"title": "缺字段"}], ensure_ascii=False)
+        calls = self._run_with_responses(
+            monkeypatch,
+            [bad_but_json, json.dumps([_valid_raw_case()], ensure_ascii=False)],
+        )
+        gateway = LLMGateway(mode="openai")
+        raw = gateway.generate_raw_cases(_profile())
+        assert calls["count"] == 2, "结构校验失败同样应触发重试"
+        assert raw == [_valid_raw_case()]
+
+    def test_exhausted_retries_raises_chinese_error(self, monkeypatch):
+        monkeypatch.delenv("CASEPILOT_LLM_MAX_RETRIES", raising=False)
+        calls = self._run_with_responses(monkeypatch, ["永远是坏 JSON"])
+        with pytest.raises(ValueError) as exc:
+            LLMGateway(mode="openai").generate_raw_cases(_profile())
+        assert calls["count"] == 3, "默认应共调用 3 次（1 次 + 2 次重试）"
+        message = str(exc.value)
+        assert "已自动重试 2 次" in message
+        assert "最后一次错误" in message
+
+    def test_max_retries_env_controls_attempts(self, monkeypatch):
+        monkeypatch.setenv("CASEPILOT_LLM_MAX_RETRIES", "0")
+        calls = self._run_with_responses(monkeypatch, ["坏 JSON"])
+        with pytest.raises(ValueError) as exc:
+            LLMGateway(mode="openai").generate_raw_cases(_profile())
+        assert calls["count"] == 1, "重试次数为 0 时不应重试"
+        assert "已自动重试 0 次" in str(exc.value)
+
+    def test_non_array_output_triggers_retry(self, monkeypatch):
+        calls = self._run_with_responses(
+            monkeypatch,
+            ['{"title": "a"}', json.dumps([_valid_raw_case()], ensure_ascii=False)],
+        )
+        LLMGateway(mode="openai").generate_raw_cases(_profile())
+        assert calls["count"] == 2
+        assert "JSON 数组" in calls["prompts"][1]
