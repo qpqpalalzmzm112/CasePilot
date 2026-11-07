@@ -1,0 +1,211 @@
+[
+  {
+    "title": "【场景法】宠物生命周期基本流：创建→查询→更新→删除全链路",
+    "precondition": "接口服务可用，已获取访问令牌，目标宠物数据不存在",
+    "steps": "1. POST /pet 创建宠物（name=旺财，photoUrls=[\"https://img.example.com/1.jpg\"]）\n2. GET /pet/{petId} 按返回的 petId 查询\n3. PUT /pet 更新 name=旺财2\n4. DELETE /pet/{petId} 删除该宠物",
+    "expected": "创建返回 201 与 petId；查询返回 200 且 name=旺财；更新返回 200 且 name 变为旺财2；删除返回 204，再次查询返回 404",
+    "priority": "P0",
+    "category": "接口",
+    "method": "场景法",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "接口主流程基本流：四个操作串联成完整生命周期，状态码序列可断言，必须 P0"
+  },
+  {
+    "title": "【场景法】异常流：查询 / 删除不存在的 petId 返回 404",
+    "precondition": "接口服务可用，petId=999999 不存在",
+    "steps": "1. GET /pet/999999 查询不存在的宠物\n2. DELETE /pet/999999 删除不存在的宠物",
+    "expected": "查询返回 404 且响应体给出「宠物不存在」类错误信息；删除返回 404，不产生副作用",
+    "priority": "P2",
+    "category": "异常",
+    "method": "场景法",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "异常流：资源不存在分支，状态码与错误信息是判定标准"
+  },
+  {
+    "title": "【场景法】备选流：创建宠物后按状态过滤查询（available）",
+    "precondition": "接口服务可用，已创建 status=available 的宠物（name=小白）",
+    "steps": "1. POST /pet 创建 status=available 的宠物小白\n2. 按 status=available 过滤查询宠物列表\n3. 将该宠物 status 更新为 sold 后再次过滤查询",
+    "expected": "第一次过滤查询结果包含小白；更新为 sold 后按 available 过滤不再返回小白，按 sold 过滤可查到",
+    "priority": "P1",
+    "category": "接口",
+    "method": "场景法",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "备选流：状态过滤分支，结果集变化可断言"
+  },
+  {
+    "title": "【等价类】创建宠物必填 name+photoUrls 合法（有效等价类）返回 201",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /pet，请求体 {\"name\":\"旺财\",\"photoUrls\":[\"https://img.example.com/1.jpg\"],\"status\":\"available\"}\n2. 校验响应",
+    "expected": "返回 201，响应体含自动生成的 id 与请求中的 name=旺财、photoUrls 一致",
+    "priority": "P1",
+    "category": "接口",
+    "method": "等价类",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "Pet schema 必填字段齐全的有效等价类，示例值取自文档 example（旺财）"
+  },
+  {
+    "title": "【等价类】创建宠物缺必填字段 name（无效等价类）返回 400",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /pet，请求体 {\"photoUrls\":[\"https://img.example.com/1.jpg\"]}（缺 name）\n2. 校验响应",
+    "expected": "返回 400，错误信息指明必填字段 name 缺失，不创建任何宠物数据",
+    "priority": "P2",
+    "category": "异常",
+    "method": "等价类",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "必填约束的无效等价类（字段缺失）"
+  },
+  {
+    "title": "【等价类】创建宠物 photoUrls 为空数组（无效等价类）返回 400",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /pet，请求体 {\"name\":\"旺财\",\"photoUrls\":[]}\n2. 校验响应",
+    "expected": "返回 400（photoUrls 至少 1 项），错误信息指明 minItems 约束，不创建宠物数据",
+    "priority": "P2",
+    "category": "异常",
+    "method": "等价类",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "数组非空约束的无效等价类"
+  },
+  {
+    "title": "【等价类】status 取枚举值 sold（有效等价类）创建成功",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /pet，请求体含 name、photoUrls 与 status=sold\n2. 查询该宠物核对 status",
+    "expected": "返回 201，查询返回的 status=sold（枚举值被接受并持久化）",
+    "priority": "P1",
+    "category": "接口",
+    "method": "等价类",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "status enum 的有效等价类（available/pending/sold 之一）"
+  },
+  {
+    "title": "【等价类】status 取枚举外值（无效等价类）返回 400",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /pet，请求体含 name、photoUrls 与 status=retired（枚举外）\n2. 校验响应",
+    "expected": "返回 400，错误信息指明 status 取值必须为 available/pending/sold 之一",
+    "priority": "P2",
+    "category": "异常",
+    "method": "等价类",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "status enum 的无效等价类（枚举外取值）"
+  },
+  {
+    "title": "【边界值】photoUrls 恰好 1 项（minItems=1）创建成功",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /pet，photoUrls 传 1 个 URL\n2. 校验响应",
+    "expected": "1 项（恰好达到 minItems=1）被接受，返回 201 且 photoUrls 数组长度为 1",
+    "priority": "P1",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "photoUrls 数量下边界点（minItems=1）"
+  },
+  {
+    "title": "【边界值】photoUrls 超过 5 项（maxItems=5）返回 400",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /pet，photoUrls 传 6 个 URL\n2. 校验响应",
+    "expected": "6 项（超过 maxItems=5）被拒绝，返回 400 并指明 maxItems 约束",
+    "priority": "P2",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "photoUrls 数量上边界外侧相邻值（5+1）"
+  },
+  {
+    "title": "【边界值】name 恰好 64 字符（maxLength=64）创建成功",
+    "precondition": "接口服务可用，已准备 64 字符的合法 name",
+    "steps": "1. POST /pet，name 传 64 字符字符串\n2. 校验响应与返回的 name 长度",
+    "expected": "64 字符（恰好达到 maxLength=64）被接受，返回 201 且 name 长度为 64",
+    "priority": "P1",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "name 长度上边界点（maxLength=64）"
+  },
+  {
+    "title": "【边界值】name 超过 64 字符返回 400",
+    "precondition": "接口服务可用，已准备 65 字符的 name",
+    "steps": "1. POST /pet，name 传 65 字符字符串\n2. 校验响应",
+    "expected": "65 字符（超过 maxLength=64）被拒绝，返回 400 并指明长度上限",
+    "priority": "P2",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "name 长度上边界外侧相邻值（64+1）"
+  },
+  {
+    "title": "【边界值】petId=1（minimum=1）查询成功，petId=0 返回 400",
+    "precondition": "接口服务可用，petId=1 的宠物已存在",
+    "steps": "1. GET /pet/1 查询\n2. GET /pet/0 查询",
+    "expected": "petId=1（恰好达到 minimum=1）返回 200 与宠物数据；petId=0（低于最小值）返回 400 参数校验错误",
+    "priority": "P1",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "petId 下边界点 + 外侧相邻值（1/0）"
+  },
+  {
+    "title": "【边界值】petId=1000000（maximum=1000000）可查询",
+    "precondition": "接口服务可用",
+    "steps": "1. GET /pet/1000000 查询\n2. GET /pet/1000001 查询",
+    "expected": "petId=1000000（恰好达到 maximum）参数校验通过（存在则 200，不存在则 404）；petId=1000001（超过最大值）返回 400",
+    "priority": "P2",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/宠物接口",
+    "note": "petId 上边界点 + 外侧相邻值（1000000/1000001）"
+  },
+  {
+    "title": "【边界值】订单 quantity=50（maximum=50）下单成功，51 返回 400",
+    "precondition": "接口服务可用，petId=1 的宠物存在且可下单",
+    "steps": "1. POST /store/order，quantity=50 提交订单\n2. POST /store/order，quantity=51 提交订单",
+    "expected": "quantity=50（恰好达到上限 50 件）返回 200 下单成功；quantity=51（超过上限）返回 400 并指明数量上限",
+    "priority": "P1",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/订单接口",
+    "note": "下单数量上下边界（50/51），与需求「单次最多 50 件」对齐"
+  },
+  {
+    "title": "【边界值】username 3 位（minLength=3）创建用户成功，2 位返回 400",
+    "precondition": "接口服务可用，用户名 tom3 尚未被占用",
+    "steps": "1. POST /user，username=tom3（3 位）、password=Abc12345、phone=13800001234 提交\n2. POST /user，username=to（2 位）提交",
+    "expected": "username 3 位（恰好达到 minLength=3）返回 201 创建成功；2 位（低于最小长度）返回 400 并指明长度下限",
+    "priority": "P1",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/用户接口",
+    "note": "username 长度下边界点 + 外侧相邻值（3/2）"
+  },
+  {
+    "title": "【边界值】phone 12 位（超过 11 位固定长度）返回 400",
+    "precondition": "接口服务可用",
+    "steps": "1. POST /user，phone=138000012345（12 位）提交\n2. 对照：phone=13800001234（11 位）提交",
+    "expected": "12 位手机号（超过固定 11 位）返回 400 并指明 phone 需 11 位；11 位手机号校验通过可创建用户",
+    "priority": "P2",
+    "category": "边界",
+    "method": "边界值",
+    "module": "Petstore 宠物商店接口/用户接口",
+    "note": "手机号固定长度 11 位的外侧相邻值 + 边界点对照"
+  },
+  {
+    "title": "【判定表】下单条件组合：petId 存在 + quantity 合法 → 200",
+    "precondition": "接口服务可用，petId=1 存在",
+    "steps": "1. 确认条件：petId=1 存在（成立）、quantity=1 在 1-50 区间（成立）\n2. POST /store/order 提交\n3. 核对响应与订单状态",
+    "expected": "两条件全成立时返回 200，订单 status=placed，响应体含 petId=1 与 quantity=1",
+    "priority": "P1",
+    "category": "接口",
+    "method": "判定表",
+    "module": "Petstore 宠物商店接口/订单接口",
+    "note": "多条件组合（petId 存在性 × quantity 合法性）全成立分支"
+  },
+  {
+    "title": "【判定表】下单条件部分不成立：petId 不存在 + quantity 合法 → 失败",
+    "precondition": "接口服务可用，petId=999999 不存在",
+    "steps": "1. 确认条件：petId=999999 不存在（不成立）、quantity=1 合法（成立）\n2. POST /store/order 提交",
+    "expected": "部分条件不成立时下单失败（返回 400/404），错误信息指明 petId 无效，不创建订单",
+    "priority": "P2",
+    "category": "异常",
+    "method": "判定表",
+    "module": "Petstore 宠物商店接口/订单接口",
+    "note": "部分条件不成立分支，验证条件短路与错误归因"
+  }
+]

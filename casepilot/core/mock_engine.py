@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from .schema import CATEGORIES, METHODS, Boundary, DocumentProfile, Feature
 
 # 用例数量与覆盖度下限（UP-3 验收标准）
@@ -108,7 +110,11 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
 
 
 def _equivalence_cases(f: Feature, module: str) -> list[dict]:
-    """规则 2：功能点 / 接口 → 等价类用例（有效类 P1 + 无效类 P2）。"""
+    """规则 2：功能点 / 接口 → 等价类用例（有效类 P1 + 无效类 P2）。
+
+    预期结果必须引用输入中提取的具体功能点名称（UP-3），
+    不得使用「返回结果符合预期」类纯模板套话。
+    """
     valid_category = "接口" if f.kind == "api" else "功能"
     return [
         {
@@ -119,7 +125,10 @@ def _equivalence_cases(f: Feature, module: str) -> list[dict]:
                 f"2. 执行「{f.name}」操作\n"
                 f"3. 观察系统响应与最终状态"
             ),
-            "expected": "系统接受有效等价类输入，功能执行成功，返回结果符合预期",
+            "expected": (
+                f"系统接受有效等价类输入并成功执行「{f.name}」：功能执行成功，"
+                f"返回结果与「{f.name}」的需求定义一致，数据正确生效"
+            ),
             "priority": "P1",
             "category": valid_category,
             "method": "等价类",
@@ -133,7 +142,10 @@ def _equivalence_cases(f: Feature, module: str) -> list[dict]:
                 f"2. 执行「{f.name}」操作\n"
                 f"3. 观察系统响应与校验提示"
             ),
-            "expected": "系统拒绝无效等价类输入，给出明确中文错误提示，数据不被写入",
+            "expected": (
+                f"系统拒绝「{f.name}」的无效等价类输入：校验不通过，「{f.name}」不被执行，"
+                f"给出明确中文错误提示，数据不被写入"
+            ),
             "priority": "P2",
             "category": "异常",
             "method": "等价类",
@@ -142,16 +154,41 @@ def _equivalence_cases(f: Feature, module: str) -> list[dict]:
     ]
 
 
-def _scenario_cases(flows: list[str], module: str) -> list[dict]:
-    """规则 3：主流程操作序列 → 场景法用例（基本流 / 备选流 / 异常流）。"""
+def _pick_scenario_boundary(profile: DocumentProfile) -> Optional[Boundary]:
+    """为场景法异常流挑选可引用的边界要素：优先阈值类（如「连续错误 5 次」）。"""
+    for b in profile.boundaries:
+        if b.kind == "threshold":
+            return b
+    return profile.boundaries[0] if profile.boundaries else None
+
+
+def _scenario_cases(profile: DocumentProfile) -> list[dict]:
+    """规则 3：主流程操作序列 → 场景法用例（基本流 / 备选流 / 异常流）。
+
+    预期结果必须引用主流程的具体步骤与文档中的具体边界要素（UP-3），
+    如「依次完成「输入账号与密码」…」、「触发「连续错误 5 次」（5次）限制…」，
+    不得使用纯模板套话。
+    """
+    module = profile.module
+    flows = profile.flows or [f"完成「{module}」的核心操作"]
     flow_steps = "\n".join(f"{i}. {step}" for i, step in enumerate(flows, 1))
     flow_line = " → ".join(flows[:3])
+    flow_quotes = "、".join(f"「{s}」" for s in flows[:3])
+    alt_anchor = flows[1] if len(flows) > 1 else flows[0]
+    boundary = _pick_scenario_boundary(profile)
+    boundary_ref = ""
+    if boundary is not None:
+        boundary_ref = (
+            f"；触发「{boundary.text}」（{_fmt_num(boundary.value)}{boundary.unit}）限制时按需求规则处理"
+        )
     return [
         {
             "title": f"【场景法】基本流：{flow_line}",
             "precondition": "初始状态正常，测试账号 / 数据已准备就绪",
             "steps": flow_steps,
-            "expected": "各步骤顺序执行成功，业务目标顺利达成，最终状态正确",
+            "expected": (
+                f"依次完成{flow_quotes}后业务目标达成：各步骤顺序执行成功，最终状态正确"
+            ),
             "priority": "P0",
             "category": "功能",
             "method": "场景法",
@@ -165,7 +202,10 @@ def _scenario_cases(flows: list[str], module: str) -> list[dict]:
                 "2. 在中间步骤跳过可选项或临时中断操作\n"
                 "3. 恢复操作并继续执行剩余步骤"
             ),
-            "expected": "系统允许合法的可选分支，恢复后流程可继续完成，数据状态保持一致",
+            "expected": (
+                f"系统允许合法的可选分支：在「{alt_anchor}」环节跳过可选项或临时中断后恢复，"
+                f"剩余步骤可继续完成，数据状态保持一致"
+            ),
             "priority": "P1",
             "category": "功能",
             "method": "场景法",
@@ -179,7 +219,10 @@ def _scenario_cases(flows: list[str], module: str) -> list[dict]:
                 "2. 在关键步骤注入异常（网络中断 / 服务不可用 / 数据冲突）\n"
                 "3. 观察系统的错误提示与数据回滚情况"
             ),
-            "expected": "系统给出明确错误提示，事务回滚或数据保持一致，不产生脏数据",
+            "expected": (
+                f"在「{flows[0]}」环节注入异常时系统给出明确错误提示，事务回滚或数据保持一致"
+                f"{boundary_ref}，不产生脏数据"
+            ),
             "priority": "P2",
             "category": "异常",
             "method": "场景法",
@@ -236,12 +279,30 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
     ]
 
 
-def _pad_cases(raw_cases: list[dict], module: str) -> list[dict]:
+def _concrete_anchor(profile: DocumentProfile) -> str:
+    """从文档要点中取一个具体锚点（功能点 / 流程步骤 / 边界），供补齐用例引用（UP-3）。
+
+    文档无任何要点时返回空字符串（补齐用例退回通用文案）。
+    """
+    if profile.features:
+        return f"「{profile.features[0].name}」"
+    if profile.flows:
+        return f"「{profile.flows[0]}」"
+    if profile.boundaries:
+        b = profile.boundaries[0]
+        return f"「{b.text}」（{_fmt_num(b.value)}{b.unit}）"
+    return ""
+
+
+def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
     """确定性补齐：保证 ≥8 条用例，且 method / category 覆盖达标。
 
     补齐落到「边界值」时，预期结果同样必须引用具体数值与两侧相邻值
-    （UP-3：边界值用例禁止通用套话），锚点取 1 件（0/1/2 三个确定值）。
+    （UP-3：边界值用例禁止通用套话），锚点取 1 件（0/1/2 三个确定值）；
+    其余补齐用例引用文档要点锚点，保证等价类 / 场景法预期结果含具体词。
     """
+    module = profile.module
+    anchor = _concrete_anchor(profile)
     i = 0
     while True:
         used_methods = {c["method"] for c in raw_cases}
@@ -260,6 +321,11 @@ def _pad_cases(raw_cases: list[dict], module: str) -> list[dict]:
             expected = (
                 "输入 1 件（恰好达到最小数量 1 件）时被接受；"
                 "两侧相邻值方向：输入 0 件（少 1）被拒绝并提示，输入 2 件（多 1）正常通过"
+            )
+        elif anchor:
+            expected = (
+                f"围绕{anchor}按{method}方法论验证{category}类输入，"
+                "系统表现与需求规则定义一致，无异常与数据不一致"
             )
         else:
             expected = "系统行为符合需求规则定义，无异常与数据不一致"
@@ -296,11 +362,10 @@ def generate(profile: DocumentProfile) -> list[dict]:
         raw_cases.extend(_equivalence_cases(f, module))
 
     # 规则 3：主流程 → 场景法用例
-    flows = profile.flows or [f"完成「{module}」的核心操作"]
-    raw_cases.extend(_scenario_cases(flows, module))
+    raw_cases.extend(_scenario_cases(profile))
 
     # 规则 5：多条件组合 → 判定表用例
     raw_cases.extend(_decision_table_cases(profile))
 
     # 规则 5：数量与覆盖度补齐
-    return _pad_cases(raw_cases, module)
+    return _pad_cases(raw_cases, profile)

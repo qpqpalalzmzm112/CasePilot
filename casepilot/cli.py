@@ -3,6 +3,8 @@
 本迭代提供：
 - casepilot gen -i <文件> [--emit xlsx|pytest|md] [-o 输出路径]：PRD / OpenAPI 通用生成入口
 - casepilot api -i <openapi> [--emit xlsx|pytest|md] [-o 输出路径]：OpenAPI 专用生成入口
+- casepilot eval -i <文件> [--golden <golden.json>]：评测生成质量（4 维评分，报告落盘 output/）
+- casepilot judge <cases.xlsx> [-o 报告.md]：LLM-as-a-Judge 用例质量自评（双模式）
 - casepilot --version：显示版本号
 
 导出格式：
@@ -21,6 +23,9 @@ from typing import Optional
 
 import typer
 from typer.core import TyperCommand, TyperGroup
+
+from evals.judge import judge_cases, load_cases_from_excel
+from evals.run import run_eval
 
 from . import __version__
 from .core.generator import detect_source_type, generate_from_file
@@ -200,6 +205,60 @@ def api(
 ) -> None:
     """解析 OpenAPI 接口文档并生成测试用例（接口专用入口，支持 --emit pytest 骨架）。"""
     _run_generate(input, emit, output, openapi_only=True)
+
+
+@app.command("eval", cls=_ChineseHelpCommand)
+def eval_cmd(
+    input: Path = typer.Option(
+        ...,
+        "-i",
+        "--input",
+        help="输入文档路径：.md/.txt（中文 PRD）或 .yaml/.yml/.json（OpenAPI），自动识别",
+    ),
+    golden: Optional[Path] = typer.Option(
+        None,
+        "--golden",
+        help="golden 基准集 JSON 路径，默认自动匹配 evals/datasets/<输入名>_golden.json",
+    ),
+) -> None:
+    """评测生成质量：对照 golden 基准集输出 4 维中文评分报告（落盘 output/eval_report_<样例名>.md）。"""
+    _ensure_log_handler()
+    try:
+        text, report_path = run_eval(input, golden)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(text)
+    typer.echo(f"\n评分报告已保存：{report_path}")
+
+
+@app.command("judge", cls=_ChineseHelpCommand)
+def judge(
+    cases: Path = typer.Argument(
+        ...,
+        help="禅道格式用例 Excel 路径（gen 产出的 *_cases.xlsx）",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "-o",
+        "--output",
+        help="评审报告 Markdown 输出路径（可选，不指定时仅打印到终端）",
+    ),
+) -> None:
+    """LLM-as-a-Judge 用例质量自评（双模式：LLM 评审 / 规则评分降级）。"""
+    _ensure_log_handler()
+    try:
+        rows = load_cases_from_excel(cases)
+        report = judge_cases(rows)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    text = report.format_report(str(cases))
+    typer.echo(text)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text, encoding="utf-8")
+        typer.echo(f"\n评审报告已保存：{output}")
 
 
 if __name__ == "__main__":
