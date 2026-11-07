@@ -1,0 +1,22 @@
+# 虚拟环境
+.venv/
+venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 生成产物（Excel 用例等）
+output/
+*.xlsx
+
+# 测试与覆盖率缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 本地环境变量（严禁提交密钥）
+.env
