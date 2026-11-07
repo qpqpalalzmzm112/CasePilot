@@ -28,7 +28,10 @@ dev = [
 casepilot = "casepilot.cli:app"
 
 [tool.setuptools.packages.find]
-include = ["casepilot*"]
+include = ["casepilot*", "evals*"]
+
+[tool.setuptools.package-data]
+evals = ["datasets/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
