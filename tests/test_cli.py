@@ -1,5 +1,6 @@
-"""CLI 测试（typer CliRunner）：--version、gen --help 与离线生成。"""
+"""CLI 测试（typer CliRunner）：--version、gen/api --help、--emit 三格式与离线生成。"""
 
+import py_compile
 from openpyxl import load_workbook
 from typer.testing import CliRunner
 
@@ -99,3 +100,110 @@ class TestGenCommand:
         assert "当前 LLM 模式" in text
         assert "确定性规则引擎" in text  # 降级提示
         assert "解析完成" in text
+
+    def test_coverage_report_printed(self, tmp_path, offline_env):
+        out = tmp_path / "b.xlsx"
+        result = runner.invoke(app, ["gen", "-i", str(LOGIN_PRD), "-o", str(out)])
+        text = _combined(result)
+        assert "覆盖维度检查：共" in text
+        assert "覆盖维度检查结论：达标" in text
+
+
+class TestEmitFormats:
+    """--emit xlsx|pytest|md 三格式（UP-1 / UP-2）。"""
+
+    def test_emit_pytest_default_path(self, tmp_path, offline_env, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["gen", "-i", str(LOGIN_PRD), "--emit", "pytest"])
+        assert result.exit_code == 0, _combined(result)
+        out = tmp_path / "output" / "prd_login_test_skeleton.py"
+        assert out.exists()
+        py_compile.compile(str(out), doraise=True)  # 合法 Python
+        assert "导出完成" in _combined(result)
+
+    def test_emit_md_default_path(self, tmp_path, offline_env, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["gen", "-i", str(BOUNDARY_PRD), "--emit", "md"])
+        assert result.exit_code == 0, _combined(result)
+        out = tmp_path / "output" / "prd_boundary_cases.md"
+        assert out.exists()
+        text = out.read_text(encoding="utf-8")
+        assert text.startswith("# 用例集：")
+        assert "## 方法论统计" in text
+
+    def test_api_emit_pytest(self, tmp_path, offline_env):
+        out = tmp_path / "pet.py"
+        result = runner.invoke(
+            app, ["api", "-i", str(PETSTORE_OPENAPI), "--emit", "pytest", "-o", str(out)]
+        )
+        assert result.exit_code == 0, _combined(result)
+        assert out.exists()
+        py_compile.compile(str(out), doraise=True)
+        text = out.read_text(encoding="utf-8")
+        assert "# 方法:" in text
+        assert 'pytest.skip("待实现")' in text
+
+    def test_api_emit_md_and_xlsx(self, tmp_path, offline_env):
+        md_out = tmp_path / "pet.md"
+        result = runner.invoke(
+            app, ["api", "-i", str(PETSTORE_OPENAPI), "--emit", "md", "-o", str(md_out)]
+        )
+        assert result.exit_code == 0, _combined(result)
+        assert md_out.read_text(encoding="utf-8").startswith("# 用例集：")
+
+        xlsx_out = tmp_path / "pet.xlsx"
+        result = runner.invoke(app, ["api", "-i", str(PETSTORE_OPENAPI), "-o", str(xlsx_out)])
+        assert result.exit_code == 0, _combined(result)
+        assert xlsx_out.exists()  # api 默认同样为 xlsx
+
+    def test_api_rejects_prd_input(self, tmp_path, offline_env):
+        result = runner.invoke(
+            app, ["api", "-i", str(LOGIN_PRD), "--emit", "pytest", "-o", str(tmp_path / "x.py")]
+        )
+        assert result.exit_code == 1
+        assert "仅支持 OpenAPI" in _combined(result)
+
+    def test_api_missing_input(self, tmp_path, offline_env):
+        result = runner.invoke(app, ["api", "-i", "不存在.yaml", "-o", str(tmp_path / "x.xlsx")])
+        assert result.exit_code == 1
+        assert "不存在" in _combined(result)
+
+    def test_unsupported_emit_value(self, tmp_path, offline_env):
+        result = runner.invoke(
+            app, ["gen", "-i", str(LOGIN_PRD), "--emit", "json", "-o", str(tmp_path / "x")]
+        )
+        assert result.exit_code == 1
+        assert "暂不支持导出格式" in _combined(result)
+
+    def test_format_alias_backward_compatible(self, tmp_path, offline_env):
+        """迭代 1 的 --format 用法保持可用（等价于 --emit）。"""
+        out = tmp_path / "x.xlsx"
+        result = runner.invoke(
+            app, ["gen", "-i", str(LOGIN_PRD), "--format", "xlsx", "-o", str(out)]
+        )
+        assert result.exit_code == 0, _combined(result)
+        assert out.exists()
+
+    def test_gen_help_mentions_three_formats(self):
+        result = runner.invoke(app, ["gen", "--help"])
+        text = _combined(result)
+        assert "pytest" in text
+        assert "md" in text
+        assert "禅道" in text
+
+
+class TestZentaoImportReport:
+    """导入前校验闭环：xlsx 导出后 CLI 输出中文校验报告（UP-2）。"""
+
+    def test_xlsx_export_prints_importable_report(self, tmp_path, offline_env):
+        out = tmp_path / "cases.xlsx"
+        result = runner.invoke(app, ["gen", "-i", str(LOGIN_PRD), "-o", str(out)])
+        text = _combined(result)
+        assert "禅道导入前校验" in text
+        assert "校验结论：可导入" in text
+
+    def test_pytest_and_md_skip_import_report(self, tmp_path, offline_env):
+        result = runner.invoke(
+            app, ["gen", "-i", str(LOGIN_PRD), "--emit", "md", "-o", str(tmp_path / "c.md")]
+        )
+        assert "禅道导入前校验" not in _combined(result)

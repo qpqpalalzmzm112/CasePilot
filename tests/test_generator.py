@@ -94,3 +94,75 @@ class TestValidationFailure:
         with pytest.raises(ValueError) as exc:
             validate_cases([{"title": "缺字段的用例"}])
         assert "第 1 条" in str(exc.value)
+
+
+class TestQualityGateIntegration:
+    """覆盖维度检查集成到生成流程（UP-3），自动执行并输出中文结果。"""
+
+    @pytest.mark.parametrize("path", SAMPLES)
+    def test_coverage_report_logged_for_samples(self, path, offline_env, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="casepilot"):
+            generate_from_file(path, mode="mock")
+        assert "覆盖维度检查：共" in caplog.text
+        assert "覆盖维度检查结论：达标" in caplog.text
+
+    def test_warning_with_gap_details_when_not_met(self, offline_env, caplog, monkeypatch):
+        import logging
+
+        # 构造不达标输入：仅 3 条、2 种方法论
+        weak_cases = [
+            {
+                "title": f"用例{i}",
+                "precondition": "p",
+                "steps": "1. s",
+                "expected": "e",
+                "priority": "P1",
+                "category": "功能",
+                "method": method,
+                "module": "m/x",
+            }
+            for i, method in enumerate(("等价类", "等价类", "场景法"), 1)
+        ]
+        monkeypatch.setattr(
+            "casepilot.core.llm.LLMGateway.generate_raw_cases",
+            lambda self, profile: weak_cases,
+        )
+        with caplog.at_level(logging.WARNING, logger="casepilot"):
+            generate_from_file(LOGIN_PRD, mode="mock")
+        assert "覆盖维度检查结论：未达标" in caplog.text
+        assert "差距明细如下" in caplog.text
+        assert "用例数量 3 条" in caplog.text
+        assert "方法论覆盖仅 2 种" in caplog.text
+
+
+class TestBoundaryExpectedNumbers:
+    """UP-3 验收：3 样例边界值用例 expected 含具体数值（≥90% 含对应数字）。"""
+
+    @pytest.mark.parametrize("path", SAMPLES)
+    def test_boundary_expected_carry_corresponding_numbers(self, path, offline_env):
+        from casepilot.core import mock_engine
+        from casepilot.core.generator import parse_document
+
+        profile = parse_document(path)
+        raw_cases = mock_engine.generate(profile)
+        boundary_cases = [c for c in raw_cases if c["method"] == "边界值"]
+        assert boundary_cases, f"{path} 应生成边界值用例"
+
+        # 规则生成的边界值用例按「边界顺序、每边界 2 条」排列
+        anchors = profile.boundaries[: mock_engine.MAX_BOUNDARIES]
+        matched = 0
+        for idx, case in enumerate(boundary_cases):
+            if idx // 2 >= len(anchors):
+                break  # 补齐用例不参与对应数字匹配
+            b = anchors[idx // 2]
+            nums = [
+                mock_engine._fmt_num(b.value - 1),
+                mock_engine._fmt_num(b.value),
+                mock_engine._fmt_num(b.value + 1),
+            ]
+            if all(n in case["expected"] for n in nums):
+                matched += 1
+        ratio = matched / len(boundary_cases)
+        assert ratio >= 0.9, f"{path} 边界值用例 expected 含对应数字比例仅 {ratio:.0%}"

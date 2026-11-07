@@ -1,5 +1,7 @@
 """mock 确定性规则引擎测试：确定性、方法论覆盖与优先级规则（UP-2 / UP-3）。"""
 
+import pytest
+
 from casepilot.core import mock_engine
 from casepilot.core.schema import (
     CATEGORIES,
@@ -129,3 +131,60 @@ class TestPadding:
     def test_fmt_num(self):
         assert mock_engine._fmt_num(8.0) == "8"
         assert mock_engine._fmt_num(1.5) == "1.5"
+
+
+class TestBoundaryExpectedQuality:
+    """UP-3：边界值用例 expected 必须含具体数值、两侧值与方向，禁止通用套话。"""
+
+    @pytest.mark.parametrize(
+        "kind, value, unit",
+        [
+            ("range_min", 8, "位"),
+            ("range_max", 20, "位"),
+            ("threshold", 5, "次"),
+        ],
+    )
+    def test_expected_contains_value_and_both_sides(self, kind, value, unit):
+        b = Boundary(text="边界", value=value, kind=kind, unit=unit)
+        for case in mock_engine._boundary_cases(b, "M"):
+            exp = case["expected"]
+            # 具体数值 + 两侧相邻值（v-1 / v / v+1）
+            for num in (value - 1, value, value + 1):
+                assert mock_engine._fmt_num(num) in exp, f"expected 缺少数值 {num}：{exp}"
+            # 方向明确（接受 / 拒绝 / 触发 / 未达 之一）
+            assert any(w in exp for w in ("接受", "拒绝", "触发", "未达")), exp
+
+    def test_expected_not_generic_boilerplate(self):
+        b = Boundary(text="阈值", value=5, kind="threshold", unit="次")
+        for case in mock_engine._boundary_cases(b, "M"):
+            assert "系统行为符合需求规则定义" not in case["expected"]
+            assert "功能表现正常" not in case["expected"]
+
+    def test_threshold_example_numbers(self):
+        """示例锚点：输入 5 被接受，4 与 6 是两侧值（题目验收样例）。"""
+        b = Boundary(text="锁定阈值", value=5, kind="threshold", unit="次")
+        inside = mock_engine._boundary_cases(b, "M")[0]
+        for num in ("5", "4", "6"):
+            assert num in inside["expected"]
+
+    def test_padded_boundary_case_also_has_numbers(self):
+        """补齐用例若落到「边界值」，同样必须带具体数值与两侧值。"""
+        profile = DocumentProfile(
+            source="a.md",
+            source_type="prd",
+            module="空文档",
+            features=[],
+            boundaries=[],
+            flows=[],
+        )
+        for case in mock_engine.generate(profile):
+            if case["method"] == "边界值":
+                for num in ("0", "1", "2"):
+                    assert num in case["expected"]
+                assert any(w in case["expected"] for w in ("接受", "拒绝"))
+
+    def test_deterministic_expected(self):
+        b = Boundary(text="阈值", value=5, kind="threshold", unit="次")
+        first = mock_engine._boundary_cases(b, "M")
+        second = mock_engine._boundary_cases(b, "M")
+        assert first == second
