@@ -49,8 +49,11 @@ class TestSkeletonContent:
     def test_method_marks_and_comment(self, tmp_path):
         out, result = _skeleton(LOGIN_PRD, tmp_path, "s.py")
         text = out.read_text(encoding="utf-8")
-        for method, mark in METHOD_MARKS.items():
-            assert f"@pytest.mark.{mark}" in text
+        # 标记与注释按用例实际使用的方法论断言（方法论枚举含安全测试 / 性能测试，
+        # 登录样例不含安全 / 性能需求，不应出现对应标记）
+        used = {c.method for c in result.cases}
+        for method in used:
+            assert f"@pytest.mark.{METHOD_MARKS[method]}" in text
             assert f"# 方法: {method}" in text
         # 每个用例的方法论都写入注释
         assert text.count("# 方法: ") == len(result.cases)

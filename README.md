@@ -1,6 +1,6 @@
 # CasePilot
 
-[![CI](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml/badge.svg)](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml) [![coverage](https://img.shields.io/badge/coverage-96.13%25-brightgreen)](https://github.com/qpqpalalzmzm112/CasePilot)
+[![CI](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml/badge.svg)](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml) [![coverage](https://img.shields.io/badge/coverage-96.78%25-brightgreen)](https://github.com/qpqpalalzmzm112/CasePilot)
 
 > 中文需求文档 / OpenAPI 接口文档 → 按测试方法论生成结构化测试用例 → 导出禅道 Excel / pytest 骨架 / Markdown
 
@@ -8,13 +8,14 @@ CasePilot 是一个开源的 AI 测试用例生成 CLI 工具，面向中文测�
 
 ## 核心特性
 
-- **显式测试方法论标注**：每条用例的「关键词」列标注所用方法论（等价类 / 边界值 / 场景法 / 判定表），用例设计过程可解释、可评审
+- **显式测试方法论标注**：每条用例的「关键词」列标注所用方法论（等价类 / 边界值 / 场景法 / 判定表 / 安全测试 / 性能测试），用例设计过程可解释、可评审；安全 / 性能类需求自动识别并标注「安全测试 / 性能测试」，不再硬套边界值
+- **需求对账机制**（`FR 清单`）：PRD 解析阶段提取功能需求清单（显式编号 FR-1.1 / 1.2 / 需求1 优先，无编号按功能点自动编号），生成后逐条对账——每个 FR 至少 1 条用例（标题带 `[FR-x.y]` 追溯前缀），缺漏 FR 自动补齐基础用例，中文对账报告随生成打印并落盘 `output/<输入名>_fr_coverage.md`
 - **多格式导出**：禅道导入 Excel（8 列标准模板）/ pytest 脚本骨架（可被 pytest 正常收集的合法 Python）/ Markdown 用例表，一键切换 `--emit xlsx|pytest|md`
 - **中文测试工作流**：输出符合禅道导入模板的 Excel（`用例` Sheet、固定 8 列、优先级数字映射），导出后自动执行**导入前校验**并输出中文报告，贴合国内团队协作习惯
 - **LLM 网关双模式自动降级**：配置 API key 时走 OpenAI 兼容协议真实调用；无 key 时先探测本地 Ollama（500ms 超时）；仍不可达则降级为**确定性规则引擎**（mock），纯离线也能完整跑通，运行时以中文日志明确提示当前模式
 - **LLM-as-a-Judge 用例质量自评**（`casepilot judge`）：对生成的用例集按 4 维度（完整性 / 方法论标注合理性 / 优先级合理性 / 可执行性）逐条评审打分，输出中文报告与引用具体用例标题的改进建议；双模式：有 key 时 LLM 评审（temperature=0、JSON 输出、解析失败自动重试），无 key 时降级为**可解释规则评分**
 - **生成质量可量化评测**（`casepilot eval`）：对照人工整理的 golden 基准集做 4 维离线评分（结构合法率 / 方法论覆盖率 / 边界数值化率 / 基准要素重合度），报告落盘 `output/eval_report_<样例名>.md`，同输入同分数（确定性）
-- **结构化校验与质量门禁**：全部用例经 pydantic v2 模型校验（枚举、必填、禁止未知字段）；LLM 输出解析失败自动重试（错误信息回灌提示词）、覆盖维度检查（数量 / 方法论 / 类型 / 标注非空）、边界值预期结果强制带具体数值与两侧相邻值
+- **结构化校验与质量门禁**：全部用例经 pydantic v2 模型校验（枚举、必填、禁止未知字段）；LLM 输出解析失败自动重试（错误信息回灌提示词）、覆盖维度检查（数量 / 方法论 / 类型 / 标注非空）、边界值预期结果强制带具体数值与两侧相邻值、**预期结果模糊词禁令**（「或 / 可能 / 视情况」类表述三层拦截：mock 模板不产出、quality 表述清晰度检查输出中文警告明细、judge 可执行性扣分并点名命中词）
 
 ## 快速开始
 
@@ -118,7 +119,7 @@ Sheet 名为「用例」，第一行为表头，列顺序固定：
 - **步骤**：多步骤用换行 `1. …\n2. …`
 - **优先级**：`P0→1`、`P1→2`、`P2→3`、`P3→4`（禅道数字优先级）
 - **用例类型**：填用例类型中文值（`功能` / `接口` / `异常` / `边界`）。禅道中可在「用例 → 用例类型」里自定义类型映射
-- **关键词**：填测试方法论（`等价类` / `边界值` / `场景法` / `判定表`）——保住显式方法论标注
+- **关键词**：填测试方法论（`等价类` / `边界值` / `场景法` / `判定表` / `安全测试` / `性能测试`）——保住显式方法论标注
 
 xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照禅道官方模板逐字段检查：表头列名与顺序、必填字段、优先级取值 1/2/3/4、Sheet 名），坏文件会明确报出错误字段与行号。导入步骤与人工验证清单见 **[docs/zentao_import.md](docs/zentao_import.md)**。
 
@@ -130,7 +131,8 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
 - 每条用例一个 `def test_<序号>_<slug>():` 函数（函数名由中文用例标题 / 接口名生成，合法 Python 标识符）
 - 函数内注释块：前置条件 / 步骤 / 预期结果 / 用例标题 / 所属模块 / 优先级
 - 方法论双标注：`# 方法: 边界值` 注释 + `@pytest.mark.boundary` 自定义标记
-  （等价类 `equivalence`、边界值 `boundary`、场景法 `scenario`、判定表 `decision_table`）
+  （等价类 `equivalence`、边界值 `boundary`、场景法 `scenario`、判定表 `decision_table`、
+  安全测试 `security`、性能测试 `performance`）
 - 函数体：`pytest.skip("待实现")` + TODO 注释，通过 `python -m py_compile` 校验
 
 ### 3. Markdown 用例表（--emit md）
@@ -151,7 +153,7 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
 | expected | str | 预期结果 |
 | priority | P0 / P1 / P2 / P3 | 优先级 |
 | category | 功能 / 接口 / 异常 / 边界 | 用例类型 |
-| method | 等价类 / 边界值 / 场景法 / 判定表 | 测试方法论 |
+| method | 等价类 / 边界值 / 场景法 / 判定表 / 安全测试 / 性能测试 | 测试方法论 |
 | module | str | 所属模块（父模块/子模块） |
 
 `GenerationResult`：`source`（输入来源）、`cases`（用例集）、`mode`（openai / ollama / mock）、`generated_at`（生成时间）。
@@ -233,6 +235,11 @@ casepilot gen -i examples/prd_login.md
 6. 接口端点补齐（仅 OpenAPI，迭代 4 新增）：主流程未覆盖的资源（按 path 首段分组，如 `/user`）各补 1 条
    **场景法 · 接口**专项；参数边界缺口最大的资源合并补 1 条**边界值**专项（引用具体边界值与两侧相邻值），
    补齐 `/user` 类端点覆盖而不灌水用例规模
+7. 安全 / 性能类需求识别（迭代 6 新增）：需求条目含安全类词（安全、权限、越权、篡改、攻击、注入、脱敏、
+   锁定、验证码等）→ 对应用例 method=**安全测试**；含性能类词（性能、并发、响应时间、压力、QPS、吞吐、
+   耗时等）→ method=**性能测试**，不再硬套边界值。识别采用两档判定：注入 / 脱敏 / 越权等强语义词直接命中；
+   安全 / 权限 / 锁定 / 验证码等泛化词需约束语境（防 / 禁止类约束动词，或安全 / 非功能类小节）才判定，
+   避免把「支持图形验证码登录」这类功能需求误标为安全测试（原有 3 样例方法论分布零漂移）
 
 ### LLM 输出质量门禁
 
@@ -240,6 +247,33 @@ casepilot gen -i examples/prd_login.md
   每次把上一次的错误信息回灌提示词引导修正；仍失败抛出清晰中文错误
 - 生成后自动执行**覆盖维度检查**（每文档 ≥8 条、method ≥3 种、category ≥3 种、method 无空值），
   不达标时以中文警告输出差距明细
+- **表述清晰度检查（预期结果模糊词禁令，迭代 6）**：expected 不得包含模糊词
+  （或 / 可能 / 视情况 / 大概 / 也许 / 正常情况 / 若干 / 等等 / 之类 / 应该可以 / 尽量，词表与逐词禁用原因见
+  `casepilot/core/quality.py` 的 `FUZZY_WORDS`），命中输出中文警告明细（用例标题 + 命中词）；
+  mock 生成模板保证不产出模糊词，`casepilot judge` 的「可执行性」维度对含模糊词用例扣分并给出
+  点名命中词的改进建议（词表 import 复用，不复制）
+
+### 需求对账机制（FR 清单，迭代 6）
+
+PRD 解析阶段提取**功能需求清单（FR 清单）**：优先识别显式编号（`FR-1.1` / `1.2` / `需求1` 等形式），
+无显式编号时按功能点自动编号（`FR-1`、`FR-2`…）。生成后逐条对账：
+
+- 每个 FR 至少 1 条用例，覆盖用例标题带 `[FR-x.y]` 追溯前缀（Excel 8 列格式不变）
+- 规则生成未命中的 FR 自动生成基础用例补齐（有效类 + 异常类各 1 条，method 按 FR 内容选方法论，
+  安全 / 性能类 FR 自动标注「安全测试 / 性能测试」）
+- 中文对账报告（FR 编号 | 需求摘要 | 覆盖用例数 | 状态 ✓/已补齐 + 覆盖率总结句）随生成流程打印，
+  并落盘 `output/<输入名>_fr_coverage.md`
+
+```text
+| FR 编号 | 需求摘要 | 覆盖用例数 | 状态 |
+| --- | --- | --- | --- |
+| FR-1 | 支持账号密码登录 | 3 | ✓ |
+| FR-7 | 支持导出报表 | 2 | 已补齐 |
+
+FR 覆盖率 100%（8/8），其中自动补齐 2 条 FR（新增 4 条用例）
+```
+
+> OpenAPI 输入（`casepilot api`）不提取 FR 清单、不做对账，命令行为保持不变。
 
 ## 固定样例（examples/）
 
@@ -248,9 +282,11 @@ casepilot gen -i examples/prd_login.md
 | `examples/prd_login.md` | 中文登录需求：验证码、连续错误 5 次锁定 30 分钟、密码 8-20 位等边界 | 27 条，method 4 种 / category 3 种 |
 | `examples/openapi_petstore.yaml` | OpenAPI 3.0 petstore：`/pet`、`/pet/{petId}`、`/store/order`、`/user`，含 schema 约束 | 30 条，method 4 种 / category 4 种 |
 | `examples/prd_boundary.md` | 纯边界值场景：优惠券满 100 减 20、单次最多 50 件等大量数字边界 | 25 条，method 4 种 / category 3 种 |
+| `examples/prd_security_perf.md` | 安全 + 性能需求（迭代 6 新增）：防 SQL 注入、敏感信息脱敏、越权拦截、接口响应时间 ≤2 秒、支持 50 并发、≥100 QPS | 35 条，安全测试 18 条 / 性能测试 12 条（FR 关联安全 / 性能用例标注率 100%） |
 
-三个样例均可无 key、无 Ollama 的纯离线环境跑通，生成结果结构合法率 100%；
-等价类 / 场景法用例预期结果引用输入具体词或数值的比例为 **100%**（3 个样例实测，≥80% 门禁，见 `tests/test_mock_concrete.py`）。
+四个样例均可无 key、无 Ollama 的纯离线环境跑通，生成结果结构合法率 100%；
+等价类 / 场景法用例预期结果引用输入具体词或数值的比例为 **100%**（实测，≥80% 门禁，见 `tests/test_mock_concrete.py`）；
+全部样例生成用例的预期结果模糊词命中 **0**（`tests/test_clarity.py` 回归断言）。
 
 ## 评测与用例质量自评（迭代 3）
 
@@ -300,7 +336,9 @@ casepilot gen -i examples/prd_login.md
 | 边界数值化率 | 100%（petstore 11/11、prd_login 10/10） | 评测维度 3（同上命令） |
 | judge 好例总分 | **4.9 / 5** | `casepilot judge output/prd_login_cases.xlsx` |
 | judge 坏例总分 | **2.0 / 5**（与好例分差 2.9） | 人工构造坏用例集（6 条，缺预期结果 + 优先级全 P0）后 `casepilot judge` |
-| pytest 测试与覆盖率 | 332 项测试通过，覆盖率 **96.13%**（门禁 ≥80%） | `pytest --cov=casepilot --cov=evals --cov-fail-under=80` |
+| FR 对账覆盖率 | prd_login 100%（6/6）、prd_boundary 100%（5/5）、prd_security_perf 100%（11/11，自动补齐 4 条 FR） | `casepilot gen -i examples/<样例>.md`（报告落盘 `output/<输入名>_fr_coverage.md`） |
+| 预期结果模糊词命中 | 0（4 样例全量） | `pytest tests/test_clarity.py` |
+| pytest 测试与覆盖率 | 396 项测试通过，覆盖率 **96.78%**（门禁 ≥80%） | `pytest --cov=casepilot --cov=evals --cov-fail-under=80` |
 
 ### 快速上手演示实录（gen → judge → eval 闭环）
 
@@ -421,12 +459,12 @@ $ casepilot api -i examples/openapi_petstore.yaml --emit pytest
 $ pytest --cov=casepilot --cov=evals --cov-fail-under=80
 ...
 ------------------------------------------------------------
-TOTAL                                     1448     56    96%
-Required test coverage of 80% reached. Total coverage: 96.13%
-332 passed in 12.72s
+TOTAL                                     1617     52    97%
+Required test coverage of 80% reached. Total coverage: 96.78%
+396 passed in 12.72s
 ```
 
-> 注：pytest 尾部两行为稳定输出（测试数 332、总覆盖率 96.13%），耗时随运行环境浮动。
+> 注：pytest 尾部两行为稳定输出（测试数 396、总覆盖率 96.78%），耗时随运行环境浮动。
 
 ### 面试讲解要点（3 个问答锚点）
 
@@ -443,7 +481,7 @@ mock 模式则从源头杜绝幻觉：全部用例内容锚定输入文档的具
 **③ 质量评估：怎么证明生成的用例质量？**
 回答锚点：量化 + 双评审。离线 eval 4 维评分（结构合法率 / 方法论覆盖率 / 边界数值化率 / 基准要素重合度，
 对照人工整理 golden 基准集，3 样例实测 100.0）；LLM-as-a-Judge 逐条评审（好例 4.9 / 5 vs 坏例 2.0 / 5，分差 2.9）；
-工程侧 332 项 pytest + 96.13% 覆盖率 + CI 门禁。改进流程用评测驱动：本轮就是靠 eval 差距明细（17/19 → 补齐 `/user` 端点）实现 19/19。
+工程侧 396 项 pytest + 96.78% 覆盖率 + CI 门禁。改进流程用评测驱动：本轮就是靠 eval 差距明细（17/19 → 补齐 `/user` 端点）实现 19/19。
 
 ## 发布文档（v1.0）
 
@@ -468,14 +506,14 @@ mock 模式则从源头杜绝幻觉：全部用例内容锚定输入文档的具
 casepilot/
   cli.py                 # typer CLI：gen / api 命令 + --version（全中文帮助）
   core/
-    schema.py            # pydantic TestCase / GenerationResult / DocumentProfile
-    methodology.py       # 方法论提示词模板（等价类/边界值/场景法/判定表）
+    schema.py            # pydantic TestCase / GenerationResult / DocumentProfile / FRItem（method 含安全测试/性能测试）
+    methodology.py       # 方法论提示词模板（等价类/边界值/场景法/判定表/安全测试/性能测试）
     llm.py               # LLM 网关：OpenAI 兼容 / Ollama / mock 自动降级 + 解析失败自动重试
-    mock_engine.py       # 确定性规则式 mock 生成器（边界值预期结果数值化）
-    generator.py         # 编排：输入文本 → 用例集 → pydantic 校验 → 覆盖维度检查
-    quality.py           # 质量门禁：覆盖维度检查 + 禅道导入前校验器
+    mock_engine.py       # 确定性规则式 mock 生成器（边界值预期结果数值化 + 安全/性能需求识别）
+    generator.py         # 编排：输入文本 → 用例集 → 校验 → 质量门禁 → FR 对账（补齐 + 对账报告）
+    quality.py           # 质量门禁：覆盖维度检查 + 模糊词禁令（FUZZY_WORDS）+ 禅道导入前校验器
   adapters/
-    prd.py               # 中文 PRD 解析（功能点 / 数字边界 / 主流程）
+    prd.py               # 中文 PRD 解析（功能点 / 数字边界 / 主流程 / FR 清单）
     openapi.py           # OpenAPI 3.x 解析（paths / parameters / schema）
   exporters/
     zentao_excel.py      # 禅道 Excel 导出（openpyxl）
@@ -500,6 +538,7 @@ tests/                   # pytest 测试套件
 - **迭代 3（已完成）**：LLM-as-a-Judge 用例质量自评（双模式）、evals 评测集与 4 维评分框架、等价类 / 场景法预期结果引用输入具体值
 - **迭代 4（已完成）**：GitHub Actions CI（pytest + 覆盖率门禁 + Python 3.10 / 3.12 矩阵）与覆盖率徽章、评测驱动改进 mock 引擎（补齐 `/user` 端点覆盖，petstore eval 97.4 → 100.0）、效果对比表 / 演示实录 / 面试讲解要点、最佳实践文档（[docs/best_practices.md](docs/best_practices.md)）
 - **迭代 5（已完成）**：v1.0 收尾——[CHANGELOG.md](CHANGELOG.md) 与 [docs/release_notes_v1.0.md](docs/release_notes_v1.0.md)、版本号定格 1.0.0
+- **迭代 6（已完成）**：实测反馈优化轮——需求对账机制（FR 清单提取 + 逐条覆盖核对 + 缺漏自动补齐 + 对账报告落盘，样例 FR 覆盖率 100%）、质量门禁模糊词禁令（quality 表述清晰度检查 + judge 可执行性扣分 + mock 模板零模糊词）、方法论标注校准（method 枚举 +安全测试/性能测试、安全 / 性能需求两档语境识别、pytest mark `security`/`performance`、新增样例 `examples/prd_security_perf.md`，原有 3 样例方法论分布零漂移）
 - **后续**：MCP 形态接入
 
 ## 已知限制

@@ -1,7 +1,7 @@
 """Markdown 用例导出测试：8 要素表格、模块分组、方法论标注与统计表（UP-2）。"""
 
 from casepilot.core.generator import generate_from_file
-from casepilot.core.schema import TestCase
+from casepilot.core.schema import METHODS, TestCase
 from casepilot.exporters.markdown_export import (
     ELEMENT_ROWS,
     build_markdown,
@@ -46,7 +46,8 @@ class TestMarkdownStructure:
             and not l.startswith("| 要素 ")
             and not l.startswith("| 方法论 ")
         ]
-        assert len(table_rows) == len(ELEMENT_ROWS) + 5  # 8 要素 + 统计表 5 行（4 方法 + 合计）
+        # 8 要素 + 方法论统计表（全部方法论枚举各 1 行 + 合计，兼容迭代 6 新枚举）
+        assert len(table_rows) == len(ELEMENT_ROWS) + len(METHODS) + 1
 
     def test_all_eight_elements_per_case(self):
         cases = [_case(title="第一条"), _case(title="第二条", method="边界值", priority="P2")]

@@ -269,3 +269,55 @@ class TestParseJudgeJson:
     def test_non_json_rejected(self):
         with pytest.raises(ValueError, match="不是合法 JSON"):
             parse_judge_json("随便的文字")
+
+
+class TestFuzzyWordPenalty:
+    """迭代 6 / UP-2：可执行性维度对含模糊词用例扣分，建议点名用例标题与命中词。"""
+
+    def _clean_case(self, i: int) -> dict:
+        return {
+            "title": f"验证登录跳转{i}",
+            "precondition": "用户已注册且账号状态正常",
+            "steps": "1. 打开登录页\n2. 输入账号密码\n3. 点击登录",
+            "expected": "登录成功并跳转首页，页面显示「欢迎」",
+            "priority": "P1",
+            "category": "功能",
+            "method": "等价类",
+            "module": "登录/功能验证",
+        }
+
+    def _fuzzy_case(self, i: int) -> dict:
+        case = self._clean_case(i)
+        case["title"] = f"验证模糊结果{i}"
+        case["expected"] = "登录成功或失败，可能跳转首页，视情况提示错误"
+        return case
+
+    def test_fuzzy_words_shared_with_quality(self):
+        """词表复用：judge 直接 import core/quality 的 FUZZY_WORDS，不复制。"""
+        from casepilot.core import quality
+        from evals import judge
+
+        assert judge.FUZZY_WORDS is quality.FUZZY_WORDS
+
+    def test_executability_drops_significantly_on_fuzzy_words(self):
+        clean = rule_review([self._clean_case(i) for i in range(1, 4)])
+        fuzzy = rule_review([self._fuzzy_case(i) for i in range(1, 4)])
+        assert clean.scores["可执行性"] == 5.0
+        assert fuzzy.scores["可执行性"] <= 2.0
+        assert clean.scores["可执行性"] - fuzzy.scores["可执行性"] >= 2.0
+
+    def test_suggestions_name_fuzzy_words_and_titles(self):
+        report = rule_review([self._fuzzy_case(i) for i in range(1, 4)])
+        joined = "".join(report.suggestions)
+        assert "模糊词" in joined
+        for word in ("或", "可能", "视情况"):
+            assert word in joined
+        assert "验证模糊结果1" in joined
+
+    def test_mixed_set_partial_penalty(self):
+        report = rule_review([self._clean_case(1), self._fuzzy_case(2)])
+        assert 2.0 <= report.scores["可执行性"] < 5.0
+
+    def test_clean_set_not_penalized(self):
+        report = rule_review([self._clean_case(i) for i in range(1, 4)])
+        assert all("模糊词" not in s for s in report.suggestions)

@@ -12,6 +12,10 @@
    （按接口 path 首段分组，如 /user、/store/order）各补 1 条「场景法·接口」
    专项用例；参数边界缺口最大的资源合并补 1 条边界值专项用例
    （引用具体边界值与两侧相邻值），补齐 /user 类端点覆盖而不灌水用例规模
+7. 安全 / 性能类需求识别（迭代 6 方法论标注校准）：需求条目含安全类词
+   （安全、权限、越权、篡改、攻击、注入、脱敏、锁定、验证码等）→ 对应用例
+   method=安全测试；含性能类词（性能、并发、响应时间、压力、QPS、吞吐、
+   耗时等）→ method=性能测试，不再硬套边界值（识别规则见 classify_requirement）
 """
 
 from __future__ import annotations
@@ -39,6 +43,48 @@ MAX_ENDPOINT_BOUNDARIES = 2
 # 接口操作名解析：如「POST /user（创建用户）」→（POST, /user）
 _API_OP_RE = re.compile(r"^([A-Z]+)\s+(/\S*?)(?:（|$)")
 
+# 补齐用例只在四种经典方法论内轮转（安全 / 性能测试是内容驱动的专项标注，
+# 不作为覆盖度补齐目标，保证补齐行为与既有回归一致）
+_PAD_METHODS = ("等价类", "边界值", "场景法", "判定表")
+
+# ---------------------------------------------------------------------------
+# 安全 / 性能类需求识别（迭代 6 方法论标注校准）
+# ---------------------------------------------------------------------------
+
+# 安全类强语义词：任意语境命中即标注「安全测试」
+_SECURITY_STRONG_RE = re.compile(
+    r"越权|篡改|攻击|注入|脱敏|加密|敏感信息|暴力破解|防爆破|XSS|CSRF"
+)
+# 安全类泛化词：单独出现时可能只是功能描述（如「支持图形验证码登录」），
+# 必须结合约束语境才判定，避免普通功能需求被误标为安全测试
+_SECURITY_SOFT_RE = re.compile(r"安全|权限|锁定|验证码")
+# 性能类词：语义明确，命中即标注「性能测试」（原有 3 样例均不含这些词）
+_PERF_RE = re.compile(r"性能|并发|响应时间|压力|QPS|qps|吞吐|耗时")
+# 约束语境一：条目自身是约束性表述（防 / 禁止 / 不得 等）
+_CONSTRAINT_RE = re.compile(r"防止|防范|禁止|不得|不允许|必须|要求|拦截|防护|防(?!御)")
+# 约束语境二：条目位于安全 / 权限 / 非功能类小节
+_SECTION_CONTEXT_RE = re.compile(r"安全|权限|非功能|约束|限制")
+
+
+def classify_requirement(text: str, section: str = "") -> Optional[str]:
+    """按需求条目内容识别安全 / 性能类需求，返回专项方法论标注，无关返回 None。
+
+    设计取舍（可面试讲述）：纯关键词匹配会把「支持图形验证码登录」这类功能需求
+    误标为安全测试，导致原有样例方法论分布漂移。因此安全类采用两档判定——
+    强语义词（注入 / 脱敏 / 越权 / 篡改 / 攻击等）直接标注「安全测试」；
+    泛化词（安全 / 权限 / 锁定 / 验证码）需条目处于约束语境（防 / 禁止 等
+    约束动词，或安全 / 非功能类小节）才标注。性能类词（性能 / 并发 /
+    响应时间 / 压力 / QPS / 吞吐 / 耗时）语义明确，直接标注「性能测试」。
+    """
+    if _SECURITY_STRONG_RE.search(text):
+        return "安全测试"
+    if _PERF_RE.search(text):
+        return "性能测试"
+    if _SECURITY_SOFT_RE.search(text) or _SECURITY_SOFT_RE.search(section):
+        if _CONSTRAINT_RE.search(text) or _SECTION_CONTEXT_RE.search(section):
+            return "安全测试"
+    return None
+
 
 def _fmt_num(value: float) -> str:
     """把数值格式化为整洁的中文文本（整数不带小数点）。"""
@@ -50,7 +96,10 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
 
     预期结果必须引用具体数值与两侧相邻值（v-1 / v / v+1）并写明方向
     （接受 / 拒绝 / 触发），不得使用通用套话（UP-3 质量门禁）。
+    安全 / 性能类需求的边界不再硬套「边界值」标注，改标专项方法论（迭代 6）。
     """
+    # 专项方法论标注：安全 / 性能类需求 → 安全测试 / 性能测试，其余保持边界值
+    method = classify_requirement(b.text, b.section) or "边界值"
     value = _fmt_num(b.value)
     unit = b.unit
     lo = _fmt_num(b.value - 1)
@@ -93,7 +142,7 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
 
     return [
         {
-            "title": f"【边界值】{b.text} - 取边界值{inside_desc}",
+            "title": f"【{method}】{b.text} - 取边界值{inside_desc}",
             "precondition": "系统处于功能可用状态，测试数据已准备就绪",
             "steps": (
                 f"1. 准备满足前置条件的测试数据\n"
@@ -103,11 +152,11 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
             "expected": inside_expected,
             "priority": "P1",
             "category": "边界",
-            "method": "边界值",
+            "method": method,
             "module": f"{module}/边界验证",
         },
         {
-            "title": f"【边界值】{b.text} - 取越界值{outside_desc}",
+            "title": f"【{method}】{b.text} - 取越界值{outside_desc}",
             "precondition": "系统处于功能可用状态，测试数据已准备就绪",
             "steps": (
                 f"1. 准备满足前置条件的测试数据\n"
@@ -117,7 +166,7 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
             "expected": outside_expected,
             "priority": "P2",
             "category": "边界",
-            "method": "边界值",
+            "method": method,
             "module": f"{module}/边界验证",
         },
     ]
@@ -128,41 +177,59 @@ def _equivalence_cases(f: Feature, module: str) -> list[dict]:
 
     预期结果必须引用输入中提取的具体功能点名称（UP-3），
     不得使用「返回结果符合预期」类纯模板套话。
+    安全 / 性能类需求改标专项方法论（迭代 6），标题标记与 method 保持一致。
     """
     valid_category = "接口" if f.kind == "api" else "功能"
+    method = classify_requirement(f.name, f.section) or "等价类"
+    if method == "等价类":
+        valid_title = f"【等价类】{f.name} - 有效等价类验证"
+        invalid_title = f"【等价类】{f.name} - 无效等价类验证"
+        valid_expected = (
+            f"系统接受有效等价类输入并成功执行「{f.name}」：功能执行成功，"
+            f"返回结果与「{f.name}」的需求定义一致，数据正确生效"
+        )
+        invalid_expected = (
+            f"系统拒绝「{f.name}」的无效等价类输入：校验不通过，「{f.name}」不被执行，"
+            f"给出明确中文错误提示，数据不被写入"
+        )
+    else:
+        valid_title = f"【{method}】{f.name} - 有效输入验证"
+        invalid_title = f"【{method}】{f.name} - 异常输入验证"
+        valid_expected = (
+            f"系统按「{f.name}」的需求规则处理有效输入：处理成功，"
+            f"返回结果与「{f.name}」的需求定义一致，防护 / 性能规则正确生效"
+        )
+        invalid_expected = (
+            f"系统拦截「{f.name}」的无效输入：校验不通过，「{f.name}」不被执行，"
+            f"给出明确中文错误提示，数据不被写入"
+        )
     return [
         {
-            "title": f"【等价类】{f.name} - 有效等价类验证",
+            "title": valid_title,
             "precondition": f"已满足「{f.name}」的基本使用条件",
             "steps": (
                 f"1. 准备合法有效的输入数据\n"
                 f"2. 执行「{f.name}」操作\n"
                 f"3. 观察系统响应与最终状态"
             ),
-            "expected": (
-                f"系统接受有效等价类输入并成功执行「{f.name}」：功能执行成功，"
-                f"返回结果与「{f.name}」的需求定义一致，数据正确生效"
-            ),
+            "expected": valid_expected,
             "priority": "P1",
             "category": valid_category,
-            "method": "等价类",
+            "method": method,
             "module": f"{module}/功能验证",
         },
         {
-            "title": f"【等价类】{f.name} - 无效等价类验证",
+            "title": invalid_title,
             "precondition": f"已满足「{f.name}」的基本使用条件",
             "steps": (
                 f"1. 准备非法 / 缺失 / 超范围的无效输入数据\n"
                 f"2. 执行「{f.name}」操作\n"
                 f"3. 观察系统响应与校验提示"
             ),
-            "expected": (
-                f"系统拒绝「{f.name}」的无效等价类输入：校验不通过，「{f.name}」不被执行，"
-                f"给出明确中文错误提示，数据不被写入"
-            ),
+            "expected": invalid_expected,
             "priority": "P2",
             "category": "异常",
-            "method": "等价类",
+            "method": method,
             "module": f"{module}/异常验证",
         },
     ]
@@ -217,7 +284,7 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
                 "3. 恢复操作并继续执行剩余步骤"
             ),
             "expected": (
-                f"系统允许合法的可选分支：在「{alt_anchor}」环节跳过可选项或临时中断后恢复，"
+                f"系统允许合法的可选分支：在「{alt_anchor}」环节跳过可选项、临时中断后恢复，"
                 f"剩余步骤可继续完成，数据状态保持一致"
             ),
             "priority": "P1",
@@ -234,7 +301,7 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
                 "3. 观察系统的错误提示与数据回滚情况"
             ),
             "expected": (
-                f"在「{flows[0]}」环节注入异常时系统给出明确错误提示，事务回滚或数据保持一致"
+                f"在「{flows[0]}」环节注入异常时系统给出明确错误提示，事务回滚、数据保持一致"
                 f"{boundary_ref}，不产生脏数据"
             ),
             "priority": "P2",
@@ -284,7 +351,7 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
                 "2. 执行目标操作\n"
                 "3. 核对系统动作与判定表期望动作一致"
             ),
-            "expected": "系统按判定表规则拒绝或走备选动作，并给出明确提示",
+            "expected": "部分条件不成立时系统拒绝该操作，走判定表定义的备选动作并给出明确中文提示",
             "priority": "P2",
             "category": "异常",
             "method": "判定表",
@@ -471,7 +538,7 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
     while True:
         used_methods = {c["method"] for c in raw_cases}
         used_categories = {c["category"] for c in raw_cases}
-        missing_method = [m for m in METHODS if m not in used_methods]
+        missing_method = [m for m in _PAD_METHODS if m not in used_methods]
         missing_category = [c for c in CATEGORIES if c not in used_categories]
         if (
             len(raw_cases) >= MIN_CASES
@@ -479,7 +546,7 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
             and len(used_categories) >= MIN_CATEGORY_COVERAGE
         ):
             return raw_cases
-        method = missing_method[0] if missing_method else METHODS[i % len(METHODS)]
+        method = missing_method[0] if missing_method else _PAD_METHODS[i % len(_PAD_METHODS)]
         category = missing_category[0] if missing_category else CATEGORIES[i % len(CATEGORIES)]
         if method == "边界值":
             expected = (

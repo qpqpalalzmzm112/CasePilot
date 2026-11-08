@@ -5,7 +5,8 @@
 - 每条用例一个 def test_<序号>_<slug>() 函数（函数名由中文用例标题 / 接口名生成，合法 Python 标识符）
 - 函数内注释块：方法论、用例标题、所属模块、优先级 / 类型、前置条件、步骤、预期结果
 - 方法论双标注：# 方法: xxx 注释 + @pytest.mark.<method_en> 自定义标记
-  （等价类=equivalence、边界值=boundary、场景法=scenario、判定表=decision_table）
+  （等价类=equivalence、边界值=boundary、场景法=scenario、判定表=decision_table、
+   安全测试=security、性能测试=performance）
 - 函数体：pytest.skip("待实现") 占位 + TODO 注释
 
 生成文件保证：
@@ -23,11 +24,14 @@ from typing import Iterable, Union
 from ..core.schema import TestCase
 
 # 方法论 → pytest 自定义 mark 英文映射（文件头注释同步说明）
+# 迭代 6 扩展：安全测试 / 性能测试 → security / performance
 METHOD_MARKS: dict[str, str] = {
     "等价类": "equivalence",
     "边界值": "boundary",
     "场景法": "scenario",
     "判定表": "decision_table",
+    "安全测试": "security",
+    "性能测试": "performance",
 }
 
 # slug 最大长度（避免函数名过长）
