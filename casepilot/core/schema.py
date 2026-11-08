@@ -15,13 +15,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # 枚举取值（全中文，与禅道工作流保持一致）
 Priority = Literal["P0", "P1", "P2", "P3"]
 Category = Literal["功能", "接口", "异常", "边界"]
-Method = Literal["等价类", "边界值", "场景法", "判定表"]
+# 方法论枚举（迭代 6 扩展）：安全 / 性能类需求不再硬套边界值等标注，
+# 改用「安全测试 / 性能测试」专项标注（method 枚举 +2，pydantic 校验同步）
+Method = Literal["等价类", "边界值", "场景法", "判定表", "安全测试", "性能测试"]
 LLMMode = Literal["openai", "ollama", "mock"]
 SourceType = Literal["prd", "openapi"]
 
 PRIORITIES: tuple[str, ...] = ("P0", "P1", "P2", "P3")
 CATEGORIES: tuple[str, ...] = ("功能", "接口", "异常", "边界")
-METHODS: tuple[str, ...] = ("等价类", "边界值", "场景法", "判定表")
+METHODS: tuple[str, ...] = ("等价类", "边界值", "场景法", "判定表", "安全测试", "性能测试")
 LLM_MODES: tuple[str, ...] = ("openai", "ollama", "mock")
 
 
@@ -70,6 +72,7 @@ class Feature(BaseModel):
     name: str = Field(..., min_length=1, description="功能点或接口名称")
     description: str = Field("", description="补充描述")
     kind: Literal["function", "api"] = Field("function", description="function=功能点，api=接口")
+    section: str = Field("", description="所在小节标题（供安全 / 性能类需求的语境判定）")
 
 
 class Boundary(BaseModel):
@@ -83,6 +86,22 @@ class Boundary(BaseModel):
         "threshold", description="range_min/range_max=区间端点，threshold=阈值"
     )
     unit: str = Field("", description="数值单位（位/次/分钟/件 等）")
+    section: str = Field("", description="所在小节标题（供安全 / 性能类需求的语境判定）")
+
+
+class FRItem(BaseModel):
+    """功能需求清单（FR 清单）条目：显式编号优先，无编号时自动编号（迭代 6 需求对账）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., min_length=1, description="FR 编号（不含前缀，如 1.1 / 1）")
+    text: str = Field(..., min_length=1, description="需求条目原文（追溯与覆盖核对依据）")
+    section: str = Field("", description="所在小节标题（供安全 / 性能类需求的语境判定）")
+
+    @property
+    def tag(self) -> str:
+        """用例标题中的追溯前缀，如 [FR-1.1]。"""
+        return f"[FR-{self.id}]"
 
 
 class DocumentProfile(BaseModel):
@@ -96,10 +115,14 @@ class DocumentProfile(BaseModel):
     features: list[Feature] = Field(default_factory=list, description="功能点 / 接口列表")
     boundaries: list[Boundary] = Field(default_factory=list, description="数字边界列表")
     flows: list[str] = Field(default_factory=list, description="主流程步骤列表")
+    frs: list[FRItem] = Field(default_factory=list, description="功能需求清单（FR 清单），仅 PRD 输入提取")
 
     def summary_text(self) -> str:
         """输出文本摘要，供 LLM 提示词与日志使用。"""
         lines = [f"文档：{self.source}（类型：{self.source_type}，模块：{self.module}）"]
+        if self.frs:
+            lines.append("功能需求清单（FR 清单，用例标题需带 [FR-编号] 追溯前缀）：")
+            lines.extend(f"- [{fr.id}] {fr.text}" for fr in self.frs)
         if self.features:
             lines.append("功能点 / 接口：")
             lines.extend(f"- [{f.kind}] {f.name}：{f.description}" for f in self.features)

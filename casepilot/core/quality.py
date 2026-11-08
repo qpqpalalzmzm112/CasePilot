@@ -1,9 +1,12 @@
-"""质量门禁雏形：覆盖维度检查 + 禅道导入前校验器（全中文输出）。
+"""质量门禁雏形：覆盖维度检查 + 表述清晰度检查 + 禅道导入前校验器（全中文输出）。
 
-两部分能力（迭代 2 质量门禁雏形）：
-1. 覆盖维度检查：每文档 ≥8 条用例、method ≥3 种、category ≥3 种、method 无空值，
-   不达标时输出中文差距明细；由生成流程自动执行。
-2. 禅道导入前校验器：对照禅道官方用例导入模板逐字段检查 Excel，
+三部分能力：
+1. 覆盖维度检查（迭代 2）：每文档 ≥8 条用例、method ≥3 种、category ≥3 种、
+   method 无空值，不达标时输出中文差距明细；由生成流程自动执行。
+2. 表述清晰度检查（迭代 6 / UP-2）：预期结果模糊词禁令——expected 不得包含
+   「或 / 可能 / 视情况」类模糊表述，命中输出中文警告明细（用例标题 + 命中词）。
+   模糊词词表 FUZZY_WORDS 是全项目唯一事实来源，evals/judge.py 复用同一词表。
+3. 禅道导入前校验器（迭代 2）：对照禅道官方用例导入模板逐字段检查 Excel，
    输出中文校验报告（可导入 / 不可导入 + 错误字段明细）。
 
 全部输出为中文；本模块不做任何网络访问。
@@ -29,6 +32,33 @@ MIN_CATEGORY_COVERAGE = 3
 REQUIRED_COLUMNS = ("所属模块", "用例标题", "步骤", "预期结果", "优先级")
 # 仅建议填写、缺失不阻断导入的列
 OPTIONAL_COLUMNS = ("前置条件", "用例类型", "关键词")
+
+# 预期结果模糊词禁令（迭代 6 / UP-2）：expected 出现以下词即视为判定标准不明确。
+# 每词禁用原因：
+# - 或：给出两个可接受结果，执行后无法判定唯一通过 / 失败
+# - 可能：结果不确定，断言无法写死
+# - 视情况：把判定推给执行者主观裁量，不可自动校验
+# - 大概：近似表述，无明确阈值或状态可校验
+# - 也许：同「可能」，结果不确定
+# - 正常情况：限定词含糊，未定义何为「正常」，异常分支判定缺失
+# - 若干：数量不确定，无法准备精确测试数据
+# - 等等：列举未穷尽，检查范围不明确
+# - 之类：类别未穷尽，检查范围不明确
+# - 应该可以：推测性结论，不是可校验的判定标准
+# - 尽量：目标非强制，达成与否都可解释为通过
+FUZZY_WORDS: tuple[str, ...] = (
+    "或",
+    "可能",
+    "视情况",
+    "大概",
+    "也许",
+    "正常情况",
+    "若干",
+    "等等",
+    "之类",
+    "应该可以",
+    "尽量",
+)
 
 # 禅道数字优先级合法取值（P0→1、P1→2、P2→3、P3→4）
 VALID_PRIORITY_VALUES = ("1", "2", "3", "4")
@@ -94,7 +124,7 @@ def check_coverage(cases: Iterable[Union[TestCase, Mapping[str, Any]]]) -> Cover
     if empty_method_count:
         issues.append(
             f"方法论标注存在空值：{empty_method_count} 条用例的 method 为空，"
-            "请补充显式方法论标注（等价类 / 边界值 / 场景法 / 判定表）"
+            "请补充显式方法论标注（等价类 / 边界值 / 场景法 / 判定表 / 安全测试 / 性能测试）"
         )
 
     return CoverageReport(
@@ -132,6 +162,59 @@ def format_coverage_report(report: CoverageReport) -> str:
     else:
         lines.append("覆盖维度检查结论：未达标，差距明细如下：")
         lines.extend(f"  - {issue}" for issue in report.issues)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 表述清晰度检查（迭代 6 / UP-2）：预期结果模糊词禁令
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ClarityReport:
+    """表述清晰度检查结果（模糊词命中中文警告明细）。"""
+
+    total: int
+    issues: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """预期结果全部无模糊词时为 True。"""
+        return not self.issues
+
+
+def find_fuzzy_words(text: str) -> list[str]:
+    """返回文本命中的模糊词（保持 FUZZY_WORDS 词表顺序，去重）。"""
+    return [w for w in FUZZY_WORDS if w in text]
+
+
+def check_clarity(cases: Iterable[Union[TestCase, Mapping[str, Any]]]) -> ClarityReport:
+    """表述清晰度检查：expected 不得包含模糊词，命中输出中文警告明细（用例标题 + 命中词）。
+
+    接受 pydantic 校验后的 TestCase，或生成中间态的原始 dict。
+    """
+    items = list(cases)
+    issues: list[str] = []
+    for case in items:
+        title = _field(case, "title") or "（无标题）"
+        fuzzy = find_fuzzy_words(_field(case, "expected"))
+        if fuzzy:
+            issues.append(
+                f"用例「{title}」预期结果含模糊词「{'、'.join(fuzzy)}」，"
+                "请改为明确的判定标准（具体状态 / 提示语 / 数值）"
+            )
+    return ClarityReport(total=len(items), issues=issues)
+
+
+def format_clarity_report(report: ClarityReport) -> str:
+    """把表述清晰度检查结果渲染为全中文报告（多行文本）。"""
+    lines = [f"表述清晰度检查：共 {report.total} 条用例（预期结果模糊词禁令）"]
+    if report.ok:
+        lines.append("  - 预期结果模糊词命中 0 条（达标）")
+        lines.append("表述清晰度检查结论：达标")
+    else:
+        lines.append(f"  - 预期结果模糊词命中 {len(report.issues)} 条，警告明细如下：")
+        lines.extend(f"  - {issue}" for issue in report.issues)
+        lines.append("表述清晰度检查结论：存在模糊表述，请按明细修正后重新生成")
     return "\n".join(lines)
 
 

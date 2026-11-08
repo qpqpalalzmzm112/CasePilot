@@ -30,6 +30,7 @@ from typing import Any, Optional, Sequence, Union
 from openpyxl import load_workbook
 
 from casepilot.core import llm as llm_gateway
+from casepilot.core.quality import FUZZY_WORDS, find_fuzzy_words
 from casepilot.core.schema import CATEGORIES, METHODS, PRIORITIES
 from casepilot.exporters.zentao_excel import ZENTAO_HEADERS
 
@@ -228,13 +229,23 @@ def _score_methodology(case: dict) -> tuple[int, Optional[str]]:
 
 
 def _score_executability(case: dict) -> tuple[int, Optional[str]]:
-    """可执行性：步骤可操作、预期结果有可校验的判定标准。"""
+    """可执行性：步骤可操作、预期结果有可校验的判定标准。
+
+    迭代 6 / UP-2：预期结果含模糊词（FUZZY_WORDS，复用 core/quality.py 词表）
+    直接扣到 2 分——「或 / 可能 / 视情况」类表述无法形成唯一的通过 / 失败判定。
+    """
     steps = case.get("steps", "").strip()
     expected = case.get("expected", "").strip()
     if not steps:
         return 1, "操作步骤为空，用例无法执行"
     if not expected:
         return 1, "预期结果为空，执行后无法判定通过"
+    fuzzy = find_fuzzy_words(expected)
+    if fuzzy:
+        return 2, (
+            f"预期结果含模糊词「{'、'.join(fuzzy)}」，"
+            "执行后无法形成唯一通过 / 失败判定，请改为明确判定标准"
+        )
     numbered = _step_count(steps) >= 2
     concrete = bool(_CONCRETE_RE.search(expected)) or len(expected) >= 15
     if numbered and concrete:
@@ -358,9 +369,10 @@ def rule_review(cases: Sequence[dict]) -> JudgeReport:
 JUDGE_SYSTEM_PROMPT = (
     "你是资深测试用例评审专家，请逐条评审测试用例并按 4 个维度打分（每维 1-5 整数分，5 为最佳）：\n"
     f"1. {DIM_COMPLETENESS}：8 要素（标题/前置条件/步骤/预期结果/优先级/类型/方法论/模块）非空且具体\n"
-    f"2. {DIM_METHODOLOGY}：方法论标注合法（等价类/边界值/场景法/判定表）且与用例设计内容相符\n"
+    f"2. {DIM_METHODOLOGY}：方法论标注合法（等价类/边界值/场景法/判定表/安全测试/性能测试）且与用例设计内容相符\n"
     f"3. {DIM_PRIORITY}：优先级（P0-P3）取值合理、用例集分布有区分度\n"
-    f"4. {DIM_EXECUTABILITY}：步骤可操作、预期结果有可校验的判定标准\n"
+    f"4. {DIM_EXECUTABILITY}：步骤可操作、预期结果有可校验的判定标准，"
+    f"预期结果不得含模糊词（{'/'.join(FUZZY_WORDS)}）\n"
     "输出要求：只输出一个合法 JSON 对象，不要任何解释文字或 markdown 代码块，结构为：\n"
     '{"cases": [{"title": "用例标题", "scores": {"'
     + DIM_COMPLETENESS + '": 5, "' + DIM_METHODOLOGY + '": 5, "'

@@ -10,6 +10,7 @@ EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 LOGIN_PRD = EXAMPLES_DIR / "prd_login.md"
 BOUNDARY_PRD = EXAMPLES_DIR / "prd_boundary.md"
 PETSTORE_OPENAPI = EXAMPLES_DIR / "openapi_petstore.yaml"
+SECURITY_PERF_PRD = EXAMPLES_DIR / "prd_security_perf.md"
 
 
 @pytest.fixture
