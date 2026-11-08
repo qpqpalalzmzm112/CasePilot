@@ -6,6 +6,10 @@
 3. Ollama 不可达 → mock（确定性规则引擎，纯离线可跑）
 
 密钥只从环境变量读取，禁止硬编码；日志全程中文。
+
+质量门禁（迭代 2）：LLM 输出 JSON 解析 / 结构校验失败时自动重试 ≤2 次
+（次数由环境变量 CASEPILOT_LLM_MAX_RETRIES 控制，默认 2），
+每次把上一次的错误信息回灌到提示词中，仍失败抛出清晰中文错误。
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import httpx
 
 from . import mock_engine
 from .methodology import build_system_prompt, build_user_prompt
-from .schema import DocumentProfile, LLMMode
+from .schema import DocumentProfile, LLMMode, validate_cases
 
 logger = logging.getLogger("casepilot")
 
@@ -30,6 +34,9 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_MODEL = "qwen2.5"
 OLLAMA_PROBE_TIMEOUT = 0.5  # 秒
 HTTP_TIMEOUT = 60.0
+
+# LLM 输出解析 / 校验失败时的最大自动重试次数（可用 CASEPILOT_LLM_MAX_RETRIES 覆盖）
+DEFAULT_MAX_RETRIES = 2
 
 # 模式中文描述（降级时给用户的明确提示）
 MODE_DESCRIPTIONS: dict[str, str] = {
@@ -60,6 +67,17 @@ def get_model(mode: LLMMode) -> str:
     if override:
         return override
     return DEFAULT_OLLAMA_MODEL if mode == "ollama" else DEFAULT_OPENAI_MODEL
+
+
+def get_max_retries() -> int:
+    """解析失败自动重试次数，可用 CASEPILOT_LLM_MAX_RETRIES 覆盖（默认 2，非法值回落默认）。"""
+    raw = os.environ.get("CASEPILOT_LLM_MAX_RETRIES", "").strip()
+    if not raw:
+        return DEFAULT_MAX_RETRIES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_MAX_RETRIES
 
 
 def probe_ollama(base_url: str = DEFAULT_OLLAMA_BASE_URL) -> bool:
@@ -147,7 +165,12 @@ class LLMGateway:
         return MODE_DESCRIPTIONS[self.mode]
 
     def generate_raw_cases(self, profile: DocumentProfile) -> list[dict]:
-        """生成用例原始 dict 列表；mock 模式走确定性规则引擎。"""
+        """生成用例原始 dict 列表；mock 模式走确定性规则引擎。
+
+        真实 LLM 模式带质量门禁：JSON 解析 / 结构校验失败时自动重试
+        （≤ CASEPILOT_LLM_MAX_RETRIES 次，每次把错误信息回灌提示词），
+        仍失败抛出清晰中文错误。
+        """
         if self.mode == "mock":
             return mock_engine.generate(profile)
 
@@ -157,5 +180,30 @@ class LLMGateway:
         api_key = get_api_key() if self.mode == "openai" else None
         model = get_model(self.mode)
         logger.info("调用 LLM：%s（模型 %s）", self.mode_description, model)
-        content = call_chat_completions(base_url, api_key, model, system, user)
-        return parse_cases_json(content)
+
+        max_retries = get_max_retries()
+        last_error: Optional[ValueError] = None
+        for attempt in range(max_retries + 1):
+            # 重试时把上一次错误信息回灌到提示词，引导模型修正输出
+            prompt = user
+            if last_error is not None:
+                prompt = (
+                    f"{user}\n\n"
+                    f"【自动重试 第 {attempt} 次】你上一次的输出存在问题：{last_error}\n"
+                    "请修正后重新输出：只输出一个合法 JSON 数组，不要任何解释文字。"
+                )
+            content = call_chat_completions(base_url, api_key, model, system, prompt)
+            try:
+                raw_cases = parse_cases_json(content)
+                validate_cases(raw_cases)  # 结构校验失败同样触发自动重试
+                return raw_cases
+            except ValueError as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    logger.warning(
+                        "LLM 输出解析 / 校验失败（第 %d 次自动重试）：%s", attempt + 1, exc
+                    )
+        raise ValueError(
+            f"LLM 输出解析 / 校验连续失败，已自动重试 {max_retries} 次仍不成功；"
+            f"最后一次错误：{last_error}"
+        )

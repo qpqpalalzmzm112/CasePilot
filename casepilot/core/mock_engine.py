@@ -30,19 +30,50 @@ def _fmt_num(value: float) -> str:
 
 
 def _boundary_cases(b: Boundary, module: str) -> list[dict]:
-    """规则 1：数字边界 → 边界值用例（边界值本身 P1、边界 ±1 P2）。"""
+    """规则 1：数字边界 → 边界值用例（边界值本身 P1、边界 ±1 P2）。
+
+    预期结果必须引用具体数值与两侧相邻值（v-1 / v / v+1）并写明方向
+    （接受 / 拒绝 / 触发），不得使用通用套话（UP-3 质量门禁）。
+    """
     value = _fmt_num(b.value)
     unit = b.unit
+    lo = _fmt_num(b.value - 1)
+    hi = _fmt_num(b.value + 1)
     if b.kind == "range_min":
         inside, outside = b.value, b.value - 1
         inside_desc, outside_desc = f"最小值 {_fmt_num(inside)}{unit}", f"低于最小值 {_fmt_num(outside)}{unit}"
+        inside_expected = (
+            f"输入 {value}{unit}（恰好达到最小值）时被接受，校验通过并正常处理；"
+            f"两侧相邻值方向：输入 {lo}{unit}（少 1）被拒绝并提示，输入 {hi}{unit}（多 1）正常通过"
+        )
+        outside_expected = (
+            f"输入 {lo}{unit}（低于最小值 {value}{unit}）时被拒绝并给出明确中文提示；"
+            f"两侧相邻值对照：输入 {value}{unit}（最小值）被接受，输入 {hi}{unit}（多 1）正常通过"
+        )
     elif b.kind == "range_max":
         inside, outside = b.value, b.value + 1
         inside_desc, outside_desc = f"最大值 {_fmt_num(inside)}{unit}", f"超过最大值 {_fmt_num(outside)}{unit}"
+        inside_expected = (
+            f"输入 {value}{unit}（恰好达到最大值）时被接受，校验通过并正常处理；"
+            f"两侧相邻值方向：输入 {lo}{unit}（少 1）正常通过，输入 {hi}{unit}（多 1）被拒绝并提示"
+        )
+        outside_expected = (
+            f"输入 {hi}{unit}（超过最大值 {value}{unit}）时被拒绝并给出明确中文提示；"
+            f"两侧相邻值对照：输入 {lo}{unit}（少 1）正常通过，输入 {value}{unit}（最大值）被接受"
+        )
     else:
         inside, outside = b.value, b.value - 1
         inside_desc = f"恰好达到阈值 {value}{unit}"
         outside_desc = f"阈值相邻值 {_fmt_num(outside)}{unit} / {_fmt_num(b.value + 1)}{unit}"
+        inside_expected = (
+            f"输入 {value}{unit}（恰好达到阈值）时被接受并按规则处理；"
+            f"两侧相邻值方向：输入 {lo}{unit}（阈值少 1）未达阈值不触发，"
+            f"输入 {hi}{unit}（阈值多 1）触发阈值限制并提示"
+        )
+        outside_expected = (
+            f"输入 {lo}{unit} 与 {hi}{unit}（阈值 {value}{unit} 的两侧相邻值）按方向分别处理："
+            f"{lo}{unit}（少 1）未达阈值不触发限制，{hi}{unit}（多 1）触发阈值限制被拒绝并提示"
+        )
 
     return [
         {
@@ -53,7 +84,7 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
                 f"2. 将输入调整为{inside_desc}\n"
                 f"3. 提交操作并观察系统处理"
             ),
-            "expected": "系统接受该边界值并按业务规则正确处理，功能表现正常",
+            "expected": inside_expected,
             "priority": "P1",
             "category": "边界",
             "method": "边界值",
@@ -67,7 +98,7 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
                 f"2. 将输入调整为{outside_desc}\n"
                 f"3. 提交操作并观察系统处理"
             ),
-            "expected": "系统按边界规则处理相邻值：拒绝越界输入或按规则截断，并给出明确中文提示，不出现异常",
+            "expected": outside_expected,
             "priority": "P2",
             "category": "边界",
             "method": "边界值",
@@ -206,7 +237,11 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
 
 
 def _pad_cases(raw_cases: list[dict], module: str) -> list[dict]:
-    """确定性补齐：保证 ≥8 条用例，且 method / category 覆盖达标。"""
+    """确定性补齐：保证 ≥8 条用例，且 method / category 覆盖达标。
+
+    补齐落到「边界值」时，预期结果同样必须引用具体数值与两侧相邻值
+    （UP-3：边界值用例禁止通用套话），锚点取 1 件（0/1/2 三个确定值）。
+    """
     i = 0
     while True:
         used_methods = {c["method"] for c in raw_cases}
@@ -221,6 +256,13 @@ def _pad_cases(raw_cases: list[dict], module: str) -> list[dict]:
             return raw_cases
         method = missing_method[0] if missing_method else METHODS[i % len(METHODS)]
         category = missing_category[0] if missing_category else CATEGORIES[i % len(CATEGORIES)]
+        if method == "边界值":
+            expected = (
+                "输入 1 件（恰好达到最小数量 1 件）时被接受；"
+                "两侧相邻值方向：输入 0 件（少 1）被拒绝并提示，输入 2 件（多 1）正常通过"
+            )
+        else:
+            expected = "系统行为符合需求规则定义，无异常与数据不一致"
         raw_cases.append(
             {
                 "title": f"【{method}】补充用例 - {category}类覆盖（{i + 1}）",
@@ -230,7 +272,7 @@ def _pad_cases(raw_cases: list[dict], module: str) -> list[dict]:
                     "2. 执行目标操作\n"
                     "3. 观察并记录系统表现"
                 ),
-                "expected": "系统行为符合需求规则定义，无异常与数据不一致",
+                "expected": expected,
                 "priority": "P2" if category in ("异常", "边界") else "P1",
                 "category": category,
                 "method": method,
