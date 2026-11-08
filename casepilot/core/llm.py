@@ -33,7 +33,7 @@ DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_MODEL = "qwen2.5"
 OLLAMA_PROBE_TIMEOUT = 0.5  # 秒
-HTTP_TIMEOUT = 60.0
+HTTP_TIMEOUT = 180.0  # 真实 LLM 整批用例生成耗时较长，60s 偏紧易偶发超时
 
 # LLM 输出解析 / 校验失败时的最大自动重试次数（可用 CASEPILOT_LLM_MAX_RETRIES 覆盖）
 DEFAULT_MAX_RETRIES = 2

@@ -176,6 +176,50 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
 
 > 密钥只从环境变量读取，任何文件、日志与提交中都不存在硬编码密钥。
 
+### 快速配置真实 LLM（以 DeepSeek 为例）
+
+DeepSeek 提供 OpenAI 兼容接口，三步接入：
+
+1. 复制 `.env.example` 为 `.env`（已被 .gitignore，不会入库），填入你的 key：
+
+```text
+CASEPILOT_LLM_API_KEY=sk-你的key
+CASEPILOT_LLM_BASE_URL=https://api.deepseek.com/v1
+CASEPILOT_LLM_MODEL=deepseek-flash    # 或 deepseek-v4-pro（质量更强）
+```
+
+2. 每次使用前把配置注入当前终端会话（Windows PowerShell，项目根目录下）：
+
+```powershell
+. .\use_env.ps1        # 一键：激活 .venv + 加载 .env（注意前面的点和空格）
+```
+
+不想用脚本的话手动设置环境变量也可以：
+
+```powershell
+# PowerShell
+$env:CASEPILOT_LLM_API_KEY = "sk-你的key"
+$env:CASEPILOT_LLM_BASE_URL = "https://api.deepseek.com/v1"
+$env:CASEPILOT_LLM_MODEL = "deepseek-flash"
+```
+
+```bash
+# Linux / macOS
+export CASEPILOT_LLM_API_KEY=sk-你的key
+export CASEPILOT_LLM_BASE_URL=https://api.deepseek.com/v1
+export CASEPILOT_LLM_MODEL=deepseek-flash
+```
+
+3. 直接用，运行日志会明示当前模式为真实调用：
+
+```powershell
+casepilot gen -i examples/prd_login.md
+# 当前 LLM 模式：openai（使用 OpenAI 兼容 API 真实调用）
+```
+
+> 其他 OpenAI 兼容服务（OpenAI / Claude 代理 / GLM 等）同理，改 `BASE_URL` 与 `MODEL` 即可。
+> 不配置 key 也完全可用（自动降级 Ollama / mock 离线生成），适合演示与 CI。
+
 ### mock 规则引擎（离线降级）
 
 1. 数字 / 比较词边界（≥/≤/不超过/至少/超过/满/减 等）→ **边界值**用例（取边界值与边界 ±1），
