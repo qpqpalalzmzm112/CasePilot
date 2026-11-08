@@ -1,4 +1,4 @@
-"""LLM-as-a-Judge 用例质量自评（核心差异化第 3 项，迭代 3 / UP-2）。
+"""LLM-as-a-Judge 用例质量自评（核心差异化第 3 项，迭代 3 / UP-2，迭代 7 幻觉溯源）。
 
 输入：禅道格式用例 Excel（与 gen 产出兼容，Sheet「用例」+ 固定 8 列）。
 输出：全中文评分报告（4 维度得分 + 总分 + 改进建议，建议引用具体用例标题）。
@@ -8,6 +8,13 @@
 2. 方法论标注合理性：关键词列标注合法且与用例内容相符
 3. 优先级合理性：优先级分布有区分度（主流程 P0 / 异常边界 P2）
 4. 可执行性：步骤可操作、预期结果有可校验的判定标准
+
+幻觉溯源校验（迭代 7 / UP-2，--source 启用）：用例的步骤与预期中的关键断言
+（数字、阈值、动作、后果）必须能在其 [FR-x] 对应的 PRD 条款（或全文）找到依据；
+无依据内容标记为「推测项」（报告专列一节，点名用例标题 + 无依据片段）；
+--strict 模式直接删除推测项用例并告警。重点拦截两类错误：
+①虚构规则（PRD 无「限流降级」而用例写了）；②规则改写（「锁定 30 分钟」被写成「30 秒」）。
+判定规则实现在 core/quality.py（可解释、可单测）。
 
 双模式（沿用 LLM 网关的模式决策）：
 - LLM 评审：有 API key（或本地 Ollama 可达）时逐条评审打分，
@@ -29,8 +36,15 @@ from typing import Any, Optional, Sequence, Union
 
 from openpyxl import load_workbook
 
+from casepilot.adapters import prd as prd_adapter
 from casepilot.core import llm as llm_gateway
-from casepilot.core.quality import FUZZY_WORDS, find_fuzzy_words
+from casepilot.core.quality import (
+    FUZZY_WORDS,
+    GroundingItem,
+    GroundingReport,
+    check_grounding,
+    find_fuzzy_words,
+)
 from casepilot.core.schema import CATEGORIES, METHODS, PRIORITIES
 from casepilot.exporters.zentao_excel import ZENTAO_HEADERS
 
@@ -145,6 +159,7 @@ class JudgeReport:
     scores: dict[str, float]  # 维度 → 1-5 分
     comments: dict[str, str]  # 维度 → 一句话解读
     suggestions: list[str] = field(default_factory=list)
+    grounding: Optional[GroundingReport] = None  # 幻觉溯源校验结果（--source 启用）
 
     @property
     def total(self) -> float:
@@ -152,7 +167,10 @@ class JudgeReport:
         return round(sum(self.scores[d] for d in JUDGE_DIMENSIONS) / len(JUDGE_DIMENSIONS), 1)
 
     def format_report(self, source: str) -> str:
-        """渲染全中文 Markdown 评审报告（不含时间戳，同输入同报告）。"""
+        """渲染全中文 Markdown 评审报告（不含时间戳，同输入同报告）。
+
+        --source 启用溯源校验时追加「幻觉溯源校验：推测项」专节（迭代 7）。
+        """
         lines = [
             "# 用例质量评审报告（LLM-as-a-Judge）",
             "",
@@ -174,6 +192,9 @@ class JudgeReport:
         lines.append("")
         for i, s in enumerate(self.suggestions, 1):
             lines.append(f"{i}. {s}")
+        if self.grounding is not None:
+            lines.append("")
+            lines.append(self.grounding.format_report())
         return "\n".join(lines)
 
 
@@ -282,7 +303,9 @@ _ADVICE_BY_DIMENSION = {
 }
 
 
-def rule_review(cases: Sequence[dict]) -> JudgeReport:
+def rule_review(
+    cases: Sequence[dict], grounding: Optional[GroundingReport] = None
+) -> JudgeReport:
     """规则评分降级：每维度按可离线判定的规则打 1-5 分（确定性）。"""
     per_case: dict[str, list[tuple[int, Optional[str]]]] = {
         DIM_COMPLETENESS: [], DIM_METHODOLOGY: [], DIM_EXECUTABILITY: [],
@@ -359,6 +382,7 @@ def rule_review(cases: Sequence[dict]) -> JudgeReport:
         scores=scores,
         comments=comments,
         suggestions=suggestions[:10],  # 建议精而不多：每维代表性 3 条 + 优先级问题，下限 MIN_SUGGESTIONS 由上方补齐保证
+        grounding=grounding,
     )
 
 
@@ -420,7 +444,11 @@ def parse_judge_json(content: str) -> dict:
     return data
 
 
-def llm_review(cases: Sequence[dict], model_note: Optional[str] = None) -> JudgeReport:
+def llm_review(
+    cases: Sequence[dict],
+    model_note: Optional[str] = None,
+    grounding: Optional[GroundingReport] = None,
+) -> JudgeReport:
     """LLM 逐条评审打分（temperature=0、JSON 输出，解析失败自动重试 ≤2 次）。"""
     system = JUDGE_SYSTEM_PROMPT
     user = build_judge_prompt(cases)
@@ -476,6 +504,7 @@ def llm_review(cases: Sequence[dict], model_note: Optional[str] = None) -> Judge
         scores=scores,
         comments=comments,
         suggestions=suggestions,
+        grounding=grounding,
     )
 
 
@@ -484,11 +513,59 @@ def resolve_judge_mode() -> str:
     return "rule" if llm_gateway.resolve_mode() == "mock" else "llm"
 
 
-def judge_cases(cases: Sequence[dict], mode: str = "auto") -> JudgeReport:
-    """用例质量自评入口：mode=auto 时按 LLM 网关模式自动选择双模式之一。"""
+def run_grounding_check(
+    cases: Sequence[dict],
+    source_path: Union[str, Path],
+    strict: bool = False,
+) -> tuple[list[dict], GroundingReport]:
+    """幻觉溯源校验（迭代 7 / UP-2）：步骤与预期的关键断言须有 PRD 依据。
+
+    - 解析 --source 指定的 PRD 原文（含 FR/NFR 条款清单），
+      对每条用例执行溯源校验，无依据内容标记为「推测项」；
+    - strict=True 时直接删除推测项用例并记入报告（调用方输出中文告警），
+      返回（剩余用例, 溯源报告）。
+    """
+    p = Path(source_path)
+    if not p.is_file():
+        raise FileNotFoundError(f"溯源依据文件不存在：{p}")
+    text = p.read_text(encoding="utf-8")
+    profile = prd_adapter.parse_text(text, source=str(p))
+    report = check_grounding(cases, text, profile.frs, source_name=str(p))
+    rows = [dict(c) for c in cases]
+    if strict and report.speculative_indexes:
+        drop = report.speculative_indexes
+        # 删除按用例折叠（同一用例多处无依据片段合并为一条删除记录）
+        removed_by_index: dict[int, list] = {}
+        for item in report.items:
+            removed_by_index.setdefault(item.index, []).append(item)
+        report.removed = [
+            GroundingItem(
+                index=idx,
+                title=group[0].title,
+                fragment="；".join(i.fragment for i in group),
+                kind=group[0].kind,
+                detail="；".join(i.detail for i in group),
+                suggestion=group[0].suggestion,
+            )
+            for idx, group in removed_by_index.items()
+        ]
+        report.items = [item for item in report.items if item.index not in drop]
+        rows = [c for i, c in enumerate(rows, 1) if i not in drop]
+    return rows, report
+
+
+def judge_cases(
+    cases: Sequence[dict],
+    mode: str = "auto",
+    grounding: Optional[GroundingReport] = None,
+) -> JudgeReport:
+    """用例质量自评入口：mode=auto 时按 LLM 网关模式自动选择双模式之一。
+
+    grounding 为 --source 幻觉溯源校验结果（可选），随报告渲染「推测项」专节。
+    """
     if not cases:
         raise ValueError("用例集为空，无法评审")
     resolved = resolve_judge_mode() if mode == "auto" else mode
     if resolved == "llm":
-        return llm_review(cases)
-    return rule_review(cases)
+        return llm_review(cases, grounding=grounding)
+    return rule_review(cases, grounding=grounding)

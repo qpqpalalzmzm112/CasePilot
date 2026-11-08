@@ -11,6 +11,7 @@ LOGIN_PRD = EXAMPLES_DIR / "prd_login.md"
 BOUNDARY_PRD = EXAMPLES_DIR / "prd_boundary.md"
 PETSTORE_OPENAPI = EXAMPLES_DIR / "openapi_petstore.yaml"
 SECURITY_PERF_PRD = EXAMPLES_DIR / "prd_security_perf.md"
+NUMBERED_PRD = EXAMPLES_DIR / "prd_numbered.md"
 
 
 @pytest.fixture

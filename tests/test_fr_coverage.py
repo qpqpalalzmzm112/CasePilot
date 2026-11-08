@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import pytest
 
@@ -15,7 +16,7 @@ from casepilot.core.generator import (
     reconcile_fr_coverage,
 )
 from casepilot.core.schema import TestCase, validate_cases
-from tests.conftest import BOUNDARY_PRD, LOGIN_PRD, PETSTORE_OPENAPI
+from tests.conftest import BOUNDARY_PRD, LOGIN_PRD, NUMBERED_PRD, PETSTORE_OPENAPI
 
 # 人为构造输入：8 个功能点，规则引擎只覆盖前 MAX_FEATURES 个，后 2 个 FR 必须被自动补齐
 GAP_PRD = (
@@ -31,11 +32,23 @@ class TestFRExtraction:
     def test_explicit_prefix_forms(self):
         text = "# 需求\n\n## 需求清单\n\nFR-1.1 支持账号密码登录\n需求3 支持导出报表\nR2 支持注册\n"
         profile = prd.parse_text(text, source="x.md")
+        # 迭代 7：编号逐字保留原文（大小写、分隔符不改写）
         assert [(f.id, f.text) for f in profile.frs] == [
-            ("1.1", "支持账号密码登录"),
-            ("3", "支持导出报表"),
-            ("2", "支持注册"),
+            ("FR-1.1", "支持账号密码登录"),
+            ("需求3", "支持导出报表"),
+            ("R2", "支持注册"),
         ]
+
+    def test_nfr_prefix_forms(self):
+        """FR / NFR 分层编号逐字保留（含中英文冒号 / 顿号后缀）。"""
+        text = (
+            "# 需求\n\n"
+            "NFR-1.2：支持 50 并发用户同时登录\n"
+            "NFR-2.1、接口响应时间不超过 2 秒\n"
+            "fr-3.1：小写编号保持原样\n"
+        )
+        profile = prd.parse_text(text, source="x.md")
+        assert [f.id for f in profile.frs] == ["NFR-1.2", "NFR-2.1", "fr-3.1"]
 
     def test_explicit_hierarchical_number(self):
         profile = prd.parse_text("# 需求\n\n1.4 支持导入数据\n", source="x.md")
@@ -54,13 +67,18 @@ class TestFRExtraction:
 
     def test_auto_numbering_from_features(self):
         profile = prd.parse_text("## 功能清单\n\n- 支持登录\n- 支持注册\n", source="a.md")
-        assert [(f.id, f.text) for f in profile.frs] == [("1", "支持登录"), ("2", "支持注册")]
+        # 迭代 7：无任何原文编号时才自动编号兜底（FR-auto-1…，auto=True）
+        assert [(f.id, f.text, f.auto) for f in profile.frs] == [
+            ("FR-auto-1", "支持登录", True),
+            ("FR-auto-2", "支持注册", True),
+        ]
 
     def test_explicit_takes_priority_over_auto(self):
         text = "# 需求\n\n## 功能清单\n\nFR-2.1 支持登录\n- 支持注册\n"
         profile = prd.parse_text(text, source="a.md")
         # 有显式编号时不做自动编号（优先识别显式编号）
-        assert [f.id for f in profile.frs] == ["2.1"]
+        assert [f.id for f in profile.frs] == ["FR-2.1"]
+        assert [f.auto for f in profile.frs] == [False]
 
     def test_login_sample_fr_matches_features(self):
         profile = parse_document(LOGIN_PRD)
@@ -106,13 +124,13 @@ class TestReconciliation:
         assert len(merged) == len(cases) + 4
 
         filled = [item for item in report.items if item.filled]
-        assert [item.fr_id for item in filled] == ["7", "8"]
+        assert [item.fr_id for item in filled] == ["FR-auto-7", "FR-auto-8"]
         text = format_fr_coverage_report(report)
         assert "已补齐" in text
         assert "其中自动补齐 2 条 FR（新增 4 条用例）" in text
-        # 补齐用例标题带 [FR-x] 追溯前缀，且每个 FR ≥1 条
-        for fr_id in ("7", "8"):
-            assert any(f"[FR-{fr_id}]" in c.title for c in merged)
+        # 补齐用例标题带原文编号追溯前缀，且每个 FR ≥1 条
+        for fr_id in ("FR-auto-7", "FR-auto-8"):
+            assert any(f"[{fr_id}]" in c.title for c in merged)
 
     def test_backfill_method_follows_fr_content(self):
         """缺漏 FR 的补齐用例按 FR 内容选方法论：安全 / 性能词 → 安全测试 / 性能测试。"""
@@ -136,10 +154,28 @@ class TestReconciliation:
         cases = validate_cases(mock_engine.generate(profile))
         _, report = reconcile_fr_coverage(profile, cases)
         text = format_fr_coverage_report(report)
-        assert "| FR 编号 | 需求摘要 | 覆盖用例数 | 状态 |" in text
-        assert "| FR-1 | 支持功能点1 |" in text
+        assert "| 编号 | 原文摘要 | 覆盖用例数 | 状态 |" in text
+        assert "| FR-auto-1 | 支持功能点1 |" in text
         assert "FR 覆盖率 100%（8/8）" in text
         assert "✓" in text and "已补齐" in text
+
+    def test_report_notes_auto_numbering_fallback(self):
+        """无编号文档的对账报告必须注明「自动编号」兜底（迭代 7 / UP-1）。"""
+        profile = prd.parse_text(GAP_PRD, source="gap.md")
+        cases = validate_cases(mock_engine.generate(profile))
+        _, report = reconcile_fr_coverage(profile, cases)
+        text = format_fr_coverage_report(report)
+        assert "自动编号" in text
+        assert "FR-auto-1" in text
+
+    def test_report_notes_original_numbering_for_numbered_doc(self):
+        """带原文编号的文档报告注明编号逐字引用原文，不写「自动编号」。"""
+        profile = parse_document(NUMBERED_PRD)
+        cases = validate_cases(mock_engine.generate(profile))
+        _, report = reconcile_fr_coverage(profile, cases)
+        text = format_fr_coverage_report(report)
+        assert "编号逐字引用 PRD 原文编号" in text
+        assert "自动编号" not in text
 
     def test_report_deterministic(self):
         profile = prd.parse_text(GAP_PRD, source="gap.md")
@@ -184,12 +220,12 @@ class TestReportFile:
 
 class TestTitlePrefix:
     def test_covered_case_title_carries_tag(self, offline_env):
-        """已覆盖 FR 的首条覆盖用例补 [FR-x] 追溯前缀，其余用例不重复打标。"""
+        """已覆盖 FR 的首条覆盖用例补 [FR-auto-x] 追溯前缀，其余用例不重复打标。"""
         result = generate_from_file(LOGIN_PRD, mode="mock")
         tagged = [c for c in result.cases if c.title.startswith("[FR-")]
         assert len(tagged) == 6
         for c in tagged:
-            assert c.title.split("] ")[0][4:].isdigit()
+            assert re.fullmatch(r"\[FR-auto-\d+\] .+", c.title)
 
     def test_tagged_case_is_valid_testcase(self, offline_env):
         result = generate_from_file(LOGIN_PRD, mode="mock")

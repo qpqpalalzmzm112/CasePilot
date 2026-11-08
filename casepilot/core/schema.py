@@ -90,18 +90,24 @@ class Boundary(BaseModel):
 
 
 class FRItem(BaseModel):
-    """功能需求清单（FR 清单）条目：显式编号优先，无编号时自动编号（迭代 6 需求对账）。"""
+    """功能需求清单（FR/NFR 清单）条目（迭代 7 需求对账返工）。
+
+    编号逐字保留 PRD 原文（FR-1.1 / NFR-1.2 / 需求3 / R2 / 1.4 等，大小写与
+    分隔符不改写）；仅当文档没有任何原文编号时，才允许自动编号兜底
+    （FR-auto-1…，auto=True），对账报告中注明「自动编号」。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(..., min_length=1, description="FR 编号（不含前缀，如 1.1 / 1）")
+    id: str = Field(..., min_length=1, description="需求编号，逐字保留原文（如 FR-1.1 / NFR-1.2 / 需求3）")
     text: str = Field(..., min_length=1, description="需求条目原文（追溯与覆盖核对依据）")
     section: str = Field("", description="所在小节标题（供安全 / 性能类需求的语境判定）")
+    auto: bool = Field(False, description="True=原文无编号时的自动编号兜底（FR-auto-N）")
 
     @property
     def tag(self) -> str:
-        """用例标题中的追溯前缀，如 [FR-1.1]。"""
-        return f"[FR-{self.id}]"
+        """用例标题中的追溯前缀，与原文编号逐字一致，如 [FR-1.1] / [NFR-1.2]。"""
+        return f"[{self.id}]"
 
 
 class DocumentProfile(BaseModel):

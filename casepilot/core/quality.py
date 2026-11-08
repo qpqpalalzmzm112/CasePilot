@@ -1,12 +1,19 @@
-"""质量门禁雏形：覆盖维度检查 + 表述清晰度检查 + 禅道导入前校验器（全中文输出）。
+"""质量门禁雏形：覆盖维度检查 + 表述清晰度检查 + 幻觉溯源辅助 + 禅道导入前校验器（全中文输出）。
 
-三部分能力：
+四部分能力：
 1. 覆盖维度检查（迭代 2）：每文档 ≥8 条用例、method ≥3 种、category ≥3 种、
    method 无空值，不达标时输出中文差距明细；由生成流程自动执行。
-2. 表述清晰度检查（迭代 6 / UP-2）：预期结果模糊词禁令——expected 不得包含
-   「或 / 可能 / 视情况」类模糊表述，命中输出中文警告明细（用例标题 + 命中词）。
-   模糊词词表 FUZZY_WORDS 是全项目唯一事实来源，evals/judge.py 复用同一词表。
-3. 禅道导入前校验器（迭代 2）：对照禅道官方用例导入模板逐字段检查 Excel，
+2. 表述清晰度检查 / 模糊词门禁（迭代 6 警告 → 迭代 7 门禁拒绝）：expected 不得包含
+   「或 / 可能 / 视情况」类模糊表述。FUZZY_WORDS 是全项目唯一事实来源，
+   evals/judge.py 复用同一词表；check_clarity 输出中文警告明细，
+   check_fuzzy_gate / drop_fuzzy_cases 是阻断接口（LLM 模式命中即校验失败、
+   回灌重试，重试耗尽丢弃并告警）。
+3. 幻觉溯源检查辅助（迭代 7 / UP-2）：用例步骤与预期中的关键断言
+   （数字 / 阈值 / 动作 / 后果）必须能在 PRD 条款（或全文）找到依据——
+   数字/阈值断言按（数值, 单位）对校验（边界 ±1 推导值豁免）；
+   动作/后果断言按实词命中判定（≥2 个实词命中算有依据）；
+   无依据内容标记为「推测项」。判定规则可解释、可单测。
+4. 禅道导入前校验器（迭代 2）：对照禅道官方用例导入模板逐字段检查 Excel，
    输出中文校验报告（可导入 / 不可导入 + 错误字段明细）。
 
 全部输出为中文；本模块不做任何网络访问。
@@ -14,14 +21,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Union
+from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 from openpyxl import load_workbook
 
 from ..exporters.zentao_excel import ZENTAO_HEADERS
-from .schema import CATEGORIES, METHODS, TestCase
+from .schema import CATEGORIES, METHODS, FRItem, TestCase
 
 # 覆盖维度门禁下限（与 mock 引擎保持一致）
 MIN_CASES = 8
@@ -216,6 +224,343 @@ def format_clarity_report(report: ClarityReport) -> str:
         lines.extend(f"  - {issue}" for issue in report.issues)
         lines.append("表述清晰度检查结论：存在模糊表述，请按明细修正后重新生成")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 模糊词门禁（迭代 7 / UP-3）：从「警告」升级为「拒绝 + 回灌重试」（阻断接口）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FuzzyViolation:
+    """模糊词门禁违规明细：用例标题 + 命中词。"""
+
+    title: str
+    words: list[str]
+
+
+def check_fuzzy_gate(cases: Iterable[Union[TestCase, Mapping[str, Any]]]) -> list[FuzzyViolation]:
+    """模糊词门禁（阻断接口）：expected 命中 FUZZY_WORDS 即视为校验失败。
+
+    与 check_clarity 同词表同口径；供 LLM 生成链路在结构校验后执行——
+    命中即触发回灌重试（见 core/llm.py），mock 模式由模板保证 0 命中。
+    """
+    violations: list[FuzzyViolation] = []
+    for case in cases:
+        fuzzy = find_fuzzy_words(_field(case, "expected"))
+        if fuzzy:
+            violations.append(FuzzyViolation(title=_field(case, "title") or "（无标题）", words=fuzzy))
+    return violations
+
+
+def build_fuzzy_feedback(violations: Sequence[FuzzyViolation]) -> str:
+    """构造回灌提示词的中文反馈（含用例标题与命中词）。"""
+    parts = [
+        f"用例「{v.title}」预期结果含模糊词「{'、'.join(v.words)}」" for v in violations
+    ]
+    return "；".join(parts) + "。请改写为可验证的确定性表述（具体状态 / 提示语 / 数值）"
+
+
+def drop_fuzzy_cases(raw_cases: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list[str]]:
+    """重试耗尽后的兜底阻断：丢弃仍命中模糊词的用例，返回（保留用例, 中文告警明细）。
+
+    告警逐条列出用例标题与命中词，便于用户定位修正。
+    """
+    kept: list[dict] = []
+    warnings: list[str] = []
+    for case in raw_cases:
+        data = dict(case)
+        fuzzy = find_fuzzy_words(_field(data, "expected"))
+        if fuzzy:
+            title = _field(data, "title") or "（无标题）"
+            warnings.append(
+                f"模糊词门禁丢弃用例「{title}」：预期结果含模糊词「{'、'.join(fuzzy)}」，已从用例集中移除"
+            )
+        else:
+            kept.append(data)
+    return kept, warnings
+
+
+# ---------------------------------------------------------------------------
+# 幻觉溯源检查辅助（迭代 7 / UP-2）：步骤与预期的关键断言必须有 PRD 依据
+# ---------------------------------------------------------------------------
+
+# 数字单位（与 adapters/prd.py 的边界量词保持一致）
+_UNIT_PATTERN = r"位|次|分钟|小时|秒|天|件|元|个|岁|字符|张|条|笔|分|%|％|并发|QPS|qps"
+# 数值 + 单位断言对：如 30 分钟 / 8 位
+_NUM_UNIT_RE = re.compile(rf"(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})")
+# 区间：如 8-20 位（两端都是断言值）
+_RANGE_RE = re.compile(rf"(\d+(?:\.\d+)?)\s*[-~—～至]\s*(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})")
+# 无单位数字（如 OpenAPI "minLength: 8"）：记为（值, ""），作宽松依据（单位不限）
+_BARE_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+# 行首步骤编号 / 需求编号标签（"1. " / "2、" / "FR-1.1：" / "NFR-1.2 "）不算断言
+_STEP_NUM_RE = re.compile(
+    r"^\s*(?:(?:N?FR|需求|R)[-\s]?)?\d+(?:\.\d+)*[.、：:．)]\s*", re.IGNORECASE
+)
+# 断言片段切分字符：句号 / 分号 / 逗号 / 顿号 / 换行 / 感叹疑问句（「」引文内部不切分）
+_FRAGMENT_SPLIT_CHARS = "。；;，,、\n!?！？"
+# 中文连续串 / 拉丁词（实词抽取素材）
+_CJK_RUN_RE = re.compile(r"[一-鿿]+")
+_LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+
+# 推测项两类判定口径
+KIND_NUMERIC = "数字/阈值断言无依据"
+KIND_ACTION = "动作/后果断言无依据"
+
+# 标准测试推导词（豁免溯源）：边界值推导方向词与通用执行动词——
+# 属测试设计的合法推导 / 执行动作，不构成需求规则断言；
+# 业务名词（如虚构的「限流 / 降级」规则词、失败 / 成功等业务后果词）
+# 不在豁免表内，必须有 PRD 依据。
+# 词表仅用于溯源判定的实词抽取，不影响模糊词词表 FUZZY_WORDS。
+_DERIVATION_WORDS: tuple[str, ...] = (
+    "接受", "拒绝", "触发", "不触发", "未达", "达到", "恰好", "最小值", "最大值",
+    "阈值", "边界值", "边界", "相邻值", "越界", "超出", "低于", "高于", "限制",
+    "输入", "输出", "提交", "执行", "观察", "准备", "调整", "核对", "记录",
+    "测试", "数据", "操作", "处理", "校验", "通过", "请求", "响应", "返回",
+    "结果", "系统", "状态", "步骤", "条款", "定义", "一致",
+)
+_DERIV_SPLIT_RE = re.compile("|".join(map(re.escape, _DERIVATION_WORDS)))
+
+# 虚词 / 语法粘连字：剔除推导词后仅剩这些字的碎片（如「并被」「时被」）
+# 属语法连接，不构成规则断言，不参与依据判定
+_GLUE_CHARS = frozenset(
+    "的了在与和或并且而把被对从由向到于为以之其此每共后前先再还就只"
+    "时按给完过很都也该各因所但若如则将请使让得个样点下上中内里外几更最已经"
+)
+
+
+def extract_numeric_tokens(text: str) -> set[tuple[float, str]]:
+    """抽取文本中的（数值, 单位）断言对（行首步骤编号不算断言）。
+
+    区间（8-20 位）两端都算断言值；无单位数字记为（值, ""），只作宽松依据。
+    """
+    tokens: set[tuple[float, str]] = set()
+    for raw_line in text.splitlines():
+        line = _STEP_NUM_RE.sub("", raw_line)
+        occupied: list[tuple[int, int]] = []
+        for m in _RANGE_RE.finditer(line):
+            tokens.add((float(m.group(1)), m.group(3)))
+            tokens.add((float(m.group(2)), m.group(3)))
+            occupied.append((m.start(), m.end()))
+        for m in _NUM_UNIT_RE.finditer(line):
+            if any(s <= m.start() < e for s, e in occupied):
+                continue
+            tokens.add((float(m.group(1)), m.group(2)))
+            occupied.append((m.start(), m.end()))
+        for m in _BARE_NUM_RE.finditer(line):
+            if any(s <= m.start() < e for s, e in occupied):
+                continue
+            tokens.add((float(m.group(0)), ""))
+    return tokens
+
+
+def _numeric_grounded(value: float, unit: str, source_pairs: set[tuple[float, str]]) -> bool:
+    """数字 / 阈值断言的依据判定：同值同单位 / 同值无单位 / 边界 ±1 推导值均算有依据。"""
+    candidates = (
+        (value, unit),
+        (value, ""),
+        (value - 1, unit),
+        (value + 1, unit),
+        (value - 1, ""),
+        (value + 1, ""),
+    )
+    return any(c in source_pairs for c in candidates)
+
+
+def _content_tokens(text: str, strip_derivations: bool = True) -> set[str]:
+    """抽取实词：中文连续串的二字组合 + 拉丁词（小写）。
+
+    strip_derivations=True 时先剔除标准测试推导词（不构成规则断言），
+    仅剩虚词 / 语法粘连字的碎片一并剔除，剩余业务实词才参与依据命中判定。
+    """
+    tokens: set[str] = set()
+    for m in _CJK_RUN_RE.finditer(text):
+        run = m.group(0)
+        pieces = _DERIV_SPLIT_RE.split(run) if strip_derivations else [run]
+        for piece in pieces:
+            if len(piece) < 2:
+                continue
+            if strip_derivations and all(ch in _GLUE_CHARS for ch in piece):
+                continue
+            tokens.update(piece[i : i + 2] for i in range(len(piece) - 1))
+    for m in _LATIN_WORD_RE.finditer(text):
+        tokens.add(m.group(0).lower())
+    return tokens
+
+
+def _source_tokens(source_text: str) -> set[str]:
+    """PRD 全文的实词命中集合（不剔除推导词：原文任何词都可作依据）。"""
+    return _content_tokens(source_text, strip_derivations=False)
+
+
+def _fmt_value(value: float) -> str:
+    """数值格式化（整数不带小数点）。"""
+    return f"{value:g}"
+
+
+def _clause_hint(clause: str) -> str:
+    """建议中的条款提示：同一 [FR-x] 条款优先，无对应条款时退回全文兜底说明。"""
+    return f"对应条款「{clause}」" if clause else "PRD 全文未见对应条款"
+
+
+def _split_fragments(text: str) -> list[str]:
+    """按句读切分断言片段（确定性）；「」引文是原文引用整体，引文内部不切分。"""
+    fragments: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "「":
+            depth += 1
+        elif ch == "」" and depth > 0:
+            depth -= 1
+        if depth == 0 and ch in _FRAGMENT_SPLIT_CHARS:
+            fragments.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    fragments.append("".join(buf))
+    return fragments
+
+
+@dataclass
+class GroundingItem:
+    """单条「推测项」：用例中无 PRD 依据的断言片段。"""
+
+    index: int  # 用例序号（1 起）
+    title: str
+    fragment: str  # 无依据片段
+    kind: str  # KIND_NUMERIC / KIND_ACTION
+    detail: str  # 判定说明
+    suggestion: str  # 改进建议（引用用例标题与片段）
+
+
+@dataclass
+class GroundingReport:
+    """幻觉溯源校验结果（推测项清单，确定性输出）。"""
+
+    source: str
+    total: int
+    items: list[GroundingItem] = field(default_factory=list)
+    removed: list[GroundingItem] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """无推测项（且严格模式未删除用例）时为 True。"""
+        return not self.items and not self.removed
+
+    @property
+    def speculative_indexes(self) -> set[int]:
+        """存在无依据断言的用例序号集合（严格模式删除依据）。"""
+        return {i.index for i in self.items}
+
+    def format_report(self) -> str:
+        """渲染「推测项」专节（全中文 Markdown，点名用例标题 + 无依据片段）。"""
+        lines = [
+            "## 幻觉溯源校验：推测项",
+            "",
+            f"- 溯源依据：{self.source or 'PRD 原文'}",
+            "- 判定口径：数字 / 阈值断言须在 PRD 条款出现（边界 ±1 推导值豁免）；"
+            "动作 / 后果断言按实词命中判定（≥2 个实词命中算有依据）",
+            f"- 受检用例：{self.total} 条；推测项：{len(self.items)} 处"
+            f"（涉及用例 {len(self.speculative_indexes)} 条）",
+        ]
+        if self.removed:
+            lines.append(f"- 严格模式：已删除推测项用例 {len(self.removed)} 条并告警")
+        lines.append("")
+        if not self.items and not self.removed:
+            lines.append("全部用例的步骤与预期均可在 PRD 找到依据，无推测项。")
+            return "\n".join(lines)
+        if self.items:
+            lines.append("### 无依据断言明细")
+            lines.append("")
+            for n, item in enumerate(self.items, 1):
+                lines.append(f"{n}. 【{item.kind}】{item.suggestion}")
+        if self.removed:
+            lines.append("")
+            lines.append("### 严格模式已删除用例")
+            lines.append("")
+            for n, item in enumerate(self.removed, 1):
+                lines.append(f"{n}. 用例「{item.title}」已删除：{item.detail}")
+        return "\n".join(lines)
+
+
+def check_grounding(
+    cases: Iterable[Union[TestCase, Mapping[str, Any]]],
+    source_text: str,
+    frs: Sequence[FRItem] = (),
+    source_name: str = "",
+) -> GroundingReport:
+    """幻觉溯源校验：用例步骤与预期的关键断言必须能在 PRD 找到依据。
+
+    判定规则（可解释、可单测）：
+    - 数字 / 阈值断言：（数值, 单位）对须在 PRD 条款原文出现（同一 [FR-x] 条款
+      优先，全文兜底）；边界 ±1 类测试推导值豁免溯源（属合法推导）。
+    - 动作 / 后果断言：按关键词覆盖判定——片段实词（中文二字组合 + 拉丁词，
+      剔除标准测试推导词）≥2 个命中 PRD 原文算有依据。
+    - 无依据内容标记为「推测项」，报告专列一节点名用例标题 + 无依据片段 + 建议；
+      --strict 由调用方（evals/judge.py）按 speculative_indexes 删除用例。
+    """
+    items: list[GroundingItem] = []
+    source_tokens = _source_tokens(source_text)
+    source_pairs = extract_numeric_tokens(source_text)
+    rows = list(cases)
+    for idx, case in enumerate(rows, 1):
+        title = _field(case, "title") or "（无标题）"
+        clause = ""
+        for fr in frs:
+            if fr.tag in title:
+                clause = fr.text
+                break
+        text = f"{_field(case, 'steps')}\n{_field(case, 'expected')}"
+        seen: set[str] = set()
+        for fragment in _split_fragments(text):
+            frag = fragment.strip()
+            if not frag or frag in seen:
+                continue
+            seen.add(frag)
+            # 1) 数字 / 阈值断言：数值 + 单位对须有 PRD 依据（±1 推导豁免）
+            bad_nums = [
+                (value, unit)
+                for value, unit in extract_numeric_tokens(frag)
+                if unit and not _numeric_grounded(value, unit, source_pairs)
+            ]
+            if bad_nums:
+                nums = "、".join(f"{_fmt_value(v)}{u}" for v, u in bad_nums)
+                items.append(
+                    GroundingItem(
+                        index=idx,
+                        title=title,
+                        fragment=frag,
+                        kind=KIND_NUMERIC,
+                        detail=f"数值 {nums} 未在 PRD 条款出现（且非边界 ±1 推导值）",
+                        suggestion=(
+                            f"用例「{title}」片段「{frag}」中的 {nums} 无 PRD 依据"
+                            f"（疑似规则改写：{_clause_hint(clause)}）；"
+                            "请改回条款原文数值，或标记为推测项并删除"
+                        ),
+                    )
+                )
+                continue
+            # 2) 动作 / 后果断言：实词命中 ≥2 个算有依据
+            tokens = _content_tokens(frag)
+            if not tokens:
+                continue
+            hits = tokens & source_tokens
+            if len(hits) >= 2 or (len(tokens) == 1 and len(hits) >= 1):
+                continue
+            items.append(
+                GroundingItem(
+                    index=idx,
+                    title=title,
+                    fragment=frag,
+                    kind=KIND_ACTION,
+                    detail=f"实词命中 {len(hits)} 个（{'、'.join(sorted(hits)) or '无'}），低于 2 个依据下限",
+                    suggestion=(
+                        f"用例「{title}」片段「{frag}」疑似虚构 / 改写规则"
+                        f"（{_clause_hint(clause)}）；请引用 PRD 条款原文改写，或删除该断言"
+                    ),
+                )
+            )
+    return GroundingReport(source=source_name, total=len(rows), items=items)
 
 
 @dataclass

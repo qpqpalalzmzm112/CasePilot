@@ -1,6 +1,6 @@
 # CasePilot
 
-[![CI](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml/badge.svg)](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml) [![coverage](https://img.shields.io/badge/coverage-96.78%25-brightgreen)](https://github.com/qpqpalalzmzm112/CasePilot)
+[![CI](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml/badge.svg)](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml) [![coverage](https://img.shields.io/badge/coverage-97.06%25-brightgreen)](https://github.com/qpqpalalzmzm112/CasePilot)
 
 > 中文需求文档 / OpenAPI 接口文档 → 按测试方法论生成结构化测试用例 → 导出禅道 Excel / pytest 骨架 / Markdown
 
@@ -9,13 +9,13 @@ CasePilot 是一个开源的 AI 测试用例生成 CLI 工具，面向中文测�
 ## 核心特性
 
 - **显式测试方法论标注**：每条用例的「关键词」列标注所用方法论（等价类 / 边界值 / 场景法 / 判定表 / 安全测试 / 性能测试），用例设计过程可解释、可评审；安全 / 性能类需求自动识别并标注「安全测试 / 性能测试」，不再硬套边界值
-- **需求对账机制**（`FR 清单`）：PRD 解析阶段提取功能需求清单（显式编号 FR-1.1 / 1.2 / 需求1 优先，无编号按功能点自动编号），生成后逐条对账——每个 FR 至少 1 条用例（标题带 `[FR-x.y]` 追溯前缀），缺漏 FR 自动补齐基础用例，中文对账报告随生成打印并落盘 `output/<输入名>_fr_coverage.md`
+- **需求对账机制**（`FR / NFR 清单`，迭代 7 返工）：PRD 解析阶段抽取**带原始编号的需求清单**——FR / NFR 分层编号（`FR-1.1` / `FR-2.3` / `NFR-1.2` / `需求1` / `R2` 等形式，含中英文冒号 / 顿号后缀）**逐字保留原文**（大小写、分隔符不改写），每条记录原文条款文本；生成后逐条对账——每个 FR / NFR 至少 1 条用例（标题带 `[FR-1.1]` / `[NFR-1.2]` 追溯前缀，与原文编号逐字一致），缺漏自动补齐基础用例，**覆盖率核对表**（编号 | 原文摘要 | 覆盖用例数 | ✓/已补齐）随生成打印并落盘 `output/<输入名>_fr_coverage.md`；仅当文档无任何原文编号时才自动编号兜底（`FR-auto-1`…，报告注明「自动编号」）
 - **多格式导出**：禅道导入 Excel（8 列标准模板）/ pytest 脚本骨架（可被 pytest 正常收集的合法 Python）/ Markdown 用例表，一键切换 `--emit xlsx|pytest|md`
 - **中文测试工作流**：输出符合禅道导入模板的 Excel（`用例` Sheet、固定 8 列、优先级数字映射），导出后自动执行**导入前校验**并输出中文报告，贴合国内团队协作习惯
 - **LLM 网关双模式自动降级**：配置 API key 时走 OpenAI 兼容协议真实调用；无 key 时先探测本地 Ollama（500ms 超时）；仍不可达则降级为**确定性规则引擎**（mock），纯离线也能完整跑通，运行时以中文日志明确提示当前模式
-- **LLM-as-a-Judge 用例质量自评**（`casepilot judge`）：对生成的用例集按 4 维度（完整性 / 方法论标注合理性 / 优先级合理性 / 可执行性）逐条评审打分，输出中文报告与引用具体用例标题的改进建议；双模式：有 key 时 LLM 评审（temperature=0、JSON 输出、解析失败自动重试），无 key 时降级为**可解释规则评分**
+- **LLM-as-a-Judge 用例质量自评**（`casepilot judge`）：对生成的用例集按 4 维度（完整性 / 方法论标注合理性 / 优先级合理性 / 可执行性）逐条评审打分，输出中文报告与引用具体用例标题的改进建议；双模式：有 key 时 LLM 评审（temperature=0、JSON 输出、解析失败自动重试），无 key 时降级为**可解释规则评分**；`--source <prd.md>` 启用**幻觉溯源校验**（迭代 7）：步骤与预期的关键断言（数字 / 阈值 / 动作 / 后果）须有 PRD 依据，无依据内容标记为「推测项」（报告专列一节，点名用例标题 + 无依据片段），`--strict` 直接删除推测项用例并告警
 - **生成质量可量化评测**（`casepilot eval`）：对照人工整理的 golden 基准集做 4 维离线评分（结构合法率 / 方法论覆盖率 / 边界数值化率 / 基准要素重合度），报告落盘 `output/eval_report_<样例名>.md`，同输入同分数（确定性）
-- **结构化校验与质量门禁**：全部用例经 pydantic v2 模型校验（枚举、必填、禁止未知字段）；LLM 输出解析失败自动重试（错误信息回灌提示词）、覆盖维度检查（数量 / 方法论 / 类型 / 标注非空）、边界值预期结果强制带具体数值与两侧相邻值、**预期结果模糊词禁令**（「或 / 可能 / 视情况」类表述三层拦截：mock 模板不产出、quality 表述清晰度检查输出中文警告明细、judge 可执行性扣分并点名命中词）
+- **结构化校验与质量门禁**：全部用例经 pydantic v2 模型校验（枚举、必填、禁止未知字段）；LLM 输出解析失败自动重试（错误信息回灌提示词）、覆盖维度检查（数量 / 方法论 / 类型 / 标注非空）、边界值预期结果强制带具体数值与两侧相邻值、**预期结果模糊词门禁**（「或 / 可能 / 视情况」类表述三层拦截：mock 模板不产出 + LLM 模式命中即校验失败、回灌重试（≤`CASEPILOT_LLM_MAX_RETRIES` 次）、重试耗尽丢弃并中文告警 + judge 可执行性扣分并点名命中词）、**幻觉溯源检查**（mock 引擎预期只引用 PRD 条款要素与标准测试推导值，不编造规则）
 
 ## 快速开始
 
@@ -97,7 +97,7 @@ casepilot judge output/prd_login_cases.xlsx -o output/judge_report_prd_login.md
 | `casepilot gen -i <文件> [--emit xlsx\|pytest\|md] [-o 输出路径]` | 解析文档并生成测试用例（PRD / OpenAPI 通用入口） |
 | `casepilot api -i <openapi> [--emit xlsx\|pytest\|md] [-o 输出路径]` | OpenAPI 专用入口，`--emit pytest` 直接产出脚本骨架 |
 | `casepilot eval -i <文件> [--golden <golden.json>]` | 评测生成质量：4 维评分报告落盘 `output/eval_report_<样例名>.md` |
-| `casepilot judge <cases.xlsx> [-o 报告.md]` | LLM-as-a-Judge 用例质量自评（LLM 评审 / 规则降级双模式） |
+| `casepilot judge <cases.xlsx> [--source <prd.md>] [--strict] [-o 报告.md]` | LLM-as-a-Judge 用例质量自评（LLM 评审 / 规则降级双模式；`--source` 幻觉溯源校验，`--strict` 删除推测项用例） |
 | `casepilot --version` | 显示版本号 |
 
 - `-i / --input`：输入文档路径。按扩展名自动识别：`.md` / `.txt` → 中文 PRD；`.yaml` / `.yml` / `.json` → OpenAPI
@@ -229,7 +229,7 @@ casepilot gen -i examples/prd_login.md
 2. 功能点 / 动宾短语 → **等价类**用例（有效类 + 无效类），预期结果引用输入中的功能点具体词
    （如「…成功执行「支持账号密码登录」…」），不再是纯模板套话
 3. 主流程操作序列 → **场景法**用例（基本流 / 备选流 / 异常流），预期结果引用具体场景要素
-   （主流程步骤文本与文档中的边界值，如「触发「连续错误 5 次」（5次）限制时按需求规则处理」）
+   （主流程步骤文本与文档中的边界值，如「触发「连续错误 5 次」（5次）时按条款「…」处理」）
 4. 优先级规则：主流程 P0、有效等价类与边界 P1、异常 / 无效类 P2
 5. 多条件组合 → **判定表**用例；并保证每文档 ≥8 条用例、method 覆盖 ≥3 种、category 覆盖 ≥3 种
 6. 接口端点补齐（仅 OpenAPI，迭代 4 新增）：主流程未覆盖的资源（按 path 首段分组，如 `/user`）各补 1 条
@@ -247,30 +247,35 @@ casepilot gen -i examples/prd_login.md
   每次把上一次的错误信息回灌提示词引导修正；仍失败抛出清晰中文错误
 - 生成后自动执行**覆盖维度检查**（每文档 ≥8 条、method ≥3 种、category ≥3 种、method 无空值），
   不达标时以中文警告输出差距明细
-- **表述清晰度检查（预期结果模糊词禁令，迭代 6）**：expected 不得包含模糊词
+- **模糊词门禁（预期结果模糊词禁令，迭代 6 警告 → 迭代 7 门禁拒绝）**：expected 不得包含模糊词
   （或 / 可能 / 视情况 / 大概 / 也许 / 正常情况 / 若干 / 等等 / 之类 / 应该可以 / 尽量，词表与逐词禁用原因见
-  `casepilot/core/quality.py` 的 `FUZZY_WORDS`），命中输出中文警告明细（用例标题 + 命中词）；
-  mock 生成模板保证不产出模糊词，`casepilot judge` 的「可执行性」维度对含模糊词用例扣分并给出
-  点名命中词的改进建议（词表 import 复用，不复制）
+  `casepilot/core/quality.py` 的 `FUZZY_WORDS`）。**LLM 模式命中即视为校验失败**：把
+  「预期结果含模糊词 X，请改写为可验证的确定性表述」回灌提示词自动重试（≤ `CASEPILOT_LLM_MAX_RETRIES` 次）；
+  重试耗尽仍命中的用例**丢弃**并输出中文告警（用例标题 + 命中词）；mock 生成模板保证 0 命中硬保证，
+  `casepilot judge` 的「可执行性」维度对含模糊词用例扣分并给出点名命中词的改进建议（词表 import 复用，不复制）
 
-### 需求对账机制（FR 清单，迭代 6）
+### 需求对账机制（FR / NFR 清单，迭代 7 返工）
 
-PRD 解析阶段提取**功能需求清单（FR 清单）**：优先识别显式编号（`FR-1.1` / `1.2` / `需求1` 等形式），
-无显式编号时按功能点自动编号（`FR-1`、`FR-2`…）。生成后逐条对账：
+PRD 解析阶段抽取**带原始编号的需求清单**：识别 FR / NFR 分层编号（`FR-1.1` / `FR-2.3` / `NFR-1.2` /
+`需求1` / `R2` / `1.4` 等形式，含中英文冒号 / 顿号后缀），**编号逐字保留原文**（大小写、分隔符不改写），
+每条记录原文条款文本。生成后逐条对账：
 
-- 每个 FR 至少 1 条用例，覆盖用例标题带 `[FR-x.y]` 追溯前缀（Excel 8 列格式不变）
-- 规则生成未命中的 FR 自动生成基础用例补齐（有效类 + 异常类各 1 条，method 按 FR 内容选方法论，
-  安全 / 性能类 FR 自动标注「安全测试 / 性能测试」）
-- 中文对账报告（FR 编号 | 需求摘要 | 覆盖用例数 | 状态 ✓/已补齐 + 覆盖率总结句）随生成流程打印，
-  并落盘 `output/<输入名>_fr_coverage.md`
+- 每个 FR / NFR 至少 1 条用例，覆盖用例标题带 `[FR-1.1]` / `[NFR-1.2]` 追溯前缀（与原文编号逐字一致，
+  Excel 8 列格式不变）
+- 规则生成未命中的条目自动生成基础用例补齐（有效类 + 异常类各 1 条，method 按条目内容选方法论，
+  安全 / 性能类自动标注「安全测试 / 性能测试」，NFR 缺漏同样补齐）
+- 中文**覆盖率核对表**（编号 | 原文摘要 | 覆盖用例数 | 状态 ✓/已补齐 + 编号来源说明 + 覆盖率总结句）
+  随生成流程打印，并落盘 `output/<输入名>_fr_coverage.md`
+- 仅当文档**没有任何原文编号**时才允许自动编号兜底（`FR-auto-1`…），报告中注明「自动编号」；
+  有原文编号的文档报告注明「编号逐字引用 PRD 原文编号」
 
 ```text
-| FR 编号 | 需求摘要 | 覆盖用例数 | 状态 |
+| 编号 | 原文摘要 | 覆盖用例数 | 状态 |
 | --- | --- | --- | --- |
-| FR-1 | 支持账号密码登录 | 3 | ✓ |
-| FR-7 | 支持导出报表 | 2 | 已补齐 |
+| FR-1.1 | 支持创建满减券，订单金额满 100 元减 20 元 | 3 | ✓ |
+| NFR-1.1 | 优惠券核销接口响应时间 ≤2 秒 | 2 | 已补齐 |
 
-FR 覆盖率 100%（8/8），其中自动补齐 2 条 FR（新增 4 条用例）
+FR 覆盖率 100%（9/9），其中自动补齐 3 条 FR（新增 6 条用例）
 ```
 
 > OpenAPI 输入（`casepilot api`）不提取 FR 清单、不做对账，命令行为保持不变。
@@ -283,10 +288,12 @@ FR 覆盖率 100%（8/8），其中自动补齐 2 条 FR（新增 4 条用例）
 | `examples/openapi_petstore.yaml` | OpenAPI 3.0 petstore：`/pet`、`/pet/{petId}`、`/store/order`、`/user`，含 schema 约束 | 30 条，method 4 种 / category 4 种 |
 | `examples/prd_boundary.md` | 纯边界值场景：优惠券满 100 减 20、单次最多 50 件等大量数字边界 | 25 条，method 4 种 / category 3 种 |
 | `examples/prd_security_perf.md` | 安全 + 性能需求（迭代 6 新增）：防 SQL 注入、敏感信息脱敏、越权拦截、接口响应时间 ≤2 秒、支持 50 并发、≥100 QPS | 35 条，安全测试 18 条 / 性能测试 12 条（FR 关联安全 / 性能用例标注率 100%） |
+| `examples/prd_numbered.md` | 带原文编号的 FR / NFR 分层需求（迭代 7 新增）：FR-1.x / FR-2.x 促销与核销规则、NFR-1.x 性能与锁定约束 | 33 条，标题 [FR-1.1] / [NFR-1.3] 标签与原文编号 100% 逐字一致，NFR 全部覆盖入表 |
 
-四个样例均可无 key、无 Ollama 的纯离线环境跑通，生成结果结构合法率 100%；
+五个样例均可无 key、无 Ollama 的纯离线环境跑通，生成结果结构合法率 100%；
 等价类 / 场景法用例预期结果引用输入具体词或数值的比例为 **100%**（实测，≥80% 门禁，见 `tests/test_mock_concrete.py`）；
-全部样例生成用例的预期结果模糊词命中 **0**（`tests/test_clarity.py` 回归断言）。
+全部样例生成用例的预期结果模糊词命中 **0**（`tests/test_clarity.py` / `tests/test_fuzzy_gate.py` 回归断言），
+且步骤与预期的断言全部可溯源到 PRD 条款（`tests/test_grounding.py` 代码断言，0 推测项）。
 
 ## 评测与用例质量自评（迭代 3）
 
@@ -321,6 +328,25 @@ FR 覆盖率 100%（8/8），其中自动补齐 2 条 FR（新增 4 条用例）
 构造的坏用例集（6 条：缺预期结果 + 优先级全 P0）总分 **2.0 / 5**，分差 2.9，且给出针对性建议
 （如「用例「验证登录0」的完整性被判低分：预期结果为空…」「用例集优先级问题：优先级全部为 P0…」）。
 
+**幻觉溯源校验（迭代 7，`--source` / `--strict`）**：用例的步骤与预期中的关键断言（数字、阈值、动作、后果）
+必须能在其 `[FR-x]` 对应的 PRD 条款（或全文）找到依据——数字 / 阈值断言按（数值, 单位）对校验
+（边界 ±1 推导值豁免，属合法推导）；动作 / 后果断言按实词命中判定（≥2 个实词命中算有依据）。
+无依据内容标记为**「推测项」**（报告专列一节，点名用例标题 + 无依据片段 + 建议）；
+`--strict` 模式直接删除推测项用例并中文告警。重点拦截两类幻觉：①虚构规则（PRD 无「限流降级」而用例写了）；
+②规则改写（PRD「锁定 30 分钟」被写成「30 秒」）：
+
+```text
+$ casepilot judge output/bad_cases.xlsx --source examples/prd_numbered.md --strict
+严格模式告警：已删除推测项用例「[NFR-1.3] 验证虚构规则」（动作/后果断言无依据）：片段「触发限流降级」
+...
+## 幻觉溯源校验：推测项
+
+- 溯源依据：examples\prd_numbered.md
+- 判定口径：数字 / 阈值断言须在 PRD 条款出现（边界 ±1 推导值豁免）；动作 / 后果断言按实词命中判定（≥2 个实词命中算有依据）
+- 受检用例：2 条；推测项：0 处（涉及用例 0 条）
+- 严格模式：已删除推测项用例 1 条并告警
+```
+
 ## 效果实测与演示（迭代 4）
 
 ### 效果对比表（mock 模式生成质量量化）
@@ -336,9 +362,11 @@ FR 覆盖率 100%（8/8），其中自动补齐 2 条 FR（新增 4 条用例）
 | 边界数值化率 | 100%（petstore 11/11、prd_login 10/10） | 评测维度 3（同上命令） |
 | judge 好例总分 | **4.9 / 5** | `casepilot judge output/prd_login_cases.xlsx` |
 | judge 坏例总分 | **2.0 / 5**（与好例分差 2.9） | 人工构造坏用例集（6 条，缺预期结果 + 优先级全 P0）后 `casepilot judge` |
-| FR 对账覆盖率 | prd_login 100%（6/6）、prd_boundary 100%（5/5）、prd_security_perf 100%（11/11，自动补齐 4 条 FR） | `casepilot gen -i examples/<样例>.md`（报告落盘 `output/<输入名>_fr_coverage.md`） |
-| 预期结果模糊词命中 | 0（4 样例全量） | `pytest tests/test_clarity.py` |
-| pytest 测试与覆盖率 | 396 项测试通过，覆盖率 **96.78%**（门禁 ≥80%） | `pytest --cov=casepilot --cov=evals --cov-fail-under=80` |
+| FR 对账覆盖率 | prd_login 100%（6/6）、prd_boundary 100%（5/5）、prd_security_perf 100%（11/11，自动补齐 4 条 FR）、prd_numbered 100%（9/9，FR / NFR 原文编号逐字一致） | `casepilot gen -i examples/<样例>.md`（报告落盘 `output/<输入名>_fr_coverage.md`） |
+| 预期结果模糊词命中 | 0（5 样例全量） | `pytest tests/test_clarity.py tests/test_fuzzy_gate.py` |
+| 幻觉溯源推测项（mock 产物） | 0（5 样例全量，步骤 + 预期全文检索） | `pytest tests/test_grounding.py` |
+| 虚构规则 / 规则改写拦截 | 「触发限流降级」标推测项、「30 分钟→30 秒」被拦截，--strict 删除生效 | `pytest tests/test_grounding.py` |
+| pytest 测试与覆盖率 | 476 项测试通过，覆盖率 **97.06%**（门禁 ≥80%） | `pytest --cov=casepilot --cov=evals --cov-fail-under=80` |
 
 ### 快速上手演示实录（gen → judge → eval 闭环）
 

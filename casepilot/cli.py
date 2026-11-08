@@ -4,7 +4,7 @@
 - casepilot gen -i <文件> [--emit xlsx|pytest|md] [-o 输出路径]：PRD / OpenAPI 通用生成入口
 - casepilot api -i <openapi> [--emit xlsx|pytest|md] [-o 输出路径]：OpenAPI 专用生成入口
 - casepilot eval -i <文件> [--golden <golden.json>]：评测生成质量（4 维评分，报告落盘 output/）
-- casepilot judge <cases.xlsx> [-o 报告.md]：LLM-as-a-Judge 用例质量自评（双模式）
+- casepilot judge <cases.xlsx> [--source <prd.md>] [--strict] [-o 报告.md]：LLM-as-a-Judge 用例质量自评（双模式，--source 启用幻觉溯源校验，--strict 删除推测项用例）
 - casepilot --version：显示版本号
 
 导出格式：
@@ -24,7 +24,7 @@ from typing import Optional
 import typer
 from typer.core import TyperCommand, TyperGroup
 
-from evals.judge import judge_cases, load_cases_from_excel
+from evals.judge import judge_cases, load_cases_from_excel, run_grounding_check
 from evals.run import run_eval
 
 from . import __version__
@@ -244,12 +244,33 @@ def judge(
         "--output",
         help="评审报告 Markdown 输出路径（可选，不指定时仅打印到终端）",
     ),
+    source: Optional[Path] = typer.Option(
+        None,
+        "--source",
+        help="PRD 原文路径：启用幻觉溯源校验（步骤与预期须有 PRD 依据），无依据断言标记为「推测项」",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="严格模式（需与 --source 联用）：直接删除推测项用例并输出中文告警",
+    ),
 ) -> None:
-    """LLM-as-a-Judge 用例质量自评（双模式：LLM 评审 / 规则评分降级）。"""
+    """LLM-as-a-Judge 用例质量自评（双模式：LLM 评审 / 规则评分降级；--source 可选溯源校验）。"""
     _ensure_log_handler()
+    if strict and source is None:
+        typer.echo("错误：--strict 需与 --source 联用（先指定溯源依据 PRD 原文）", err=True)
+        raise typer.Exit(code=1)
     try:
         rows = load_cases_from_excel(cases)
-        report = judge_cases(rows)
+        grounding = None
+        if source is not None:
+            rows, grounding = run_grounding_check(rows, source, strict=strict)
+            for item in grounding.removed:
+                typer.echo(
+                    f"严格模式告警：已删除推测项用例「{item.title}」（{item.kind}）：片段「{item.fragment}」",
+                    err=True,
+                )
+        report = judge_cases(rows, grounding=grounding)
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"错误：{exc}", err=True)
         raise typer.Exit(code=1) from exc
