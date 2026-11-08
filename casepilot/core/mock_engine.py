@@ -8,10 +8,16 @@
 4. 优先级规则：主流程 P0、有效等价类与边界 P1、异常 / 无效类 P2
 5. 多条件组合 → 判定表用例；最终保证每文档 ≥8 条用例，
    method 覆盖 ≥3 种、category 覆盖 ≥3 种
+6. 接口端点补齐（仅 OpenAPI 文档，迭代 4 新增）：主流程未覆盖的资源
+   （按接口 path 首段分组，如 /user、/store/order）各补 1 条「场景法·接口」
+   专项用例；参数边界缺口最大的资源合并补 1 条边界值专项用例
+   （引用具体边界值与两侧相邻值），补齐 /user 类端点覆盖而不灌水用例规模
 """
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .schema import CATEGORIES, METHODS, Boundary, DocumentProfile, Feature
@@ -24,6 +30,14 @@ MIN_CATEGORY_COVERAGE = 3
 # 单文档生成规模上限（少而精：避免机械用例灌水）
 MAX_BOUNDARIES = 5
 MAX_FEATURES = 6
+
+# 规则 6（接口端点补齐）规模上限：每个资源最多 1 条场景法专项，
+# 参数边界专项每文档合并 1 条（引用的边界数有上限），防止用例灌水
+MAX_ENDPOINT_SCENARIOS = 3
+MAX_ENDPOINT_BOUNDARIES = 2
+
+# 接口操作名解析：如「POST /user（创建用户）」→（POST, /user）
+_API_OP_RE = re.compile(r"^([A-Z]+)\s+(/\S*?)(?:（|$)")
 
 
 def _fmt_num(value: float) -> str:
@@ -279,6 +293,156 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
     ]
 
 
+@dataclass
+class _ResourceGroup:
+    """接口资源分组：path 首段为键（如 user / store），合并路径词元与所属接口。"""
+
+    key: str
+    tokens: set[str] = field(default_factory=set)
+    features: list[Feature] = field(default_factory=list)
+
+
+def _api_resource(feature_name: str) -> Optional[tuple[str, set[str]]]:
+    """从接口名解析资源键与路径词元（如「POST /user（创建用户）」→（user, {user}））。
+
+    非「METHOD /path」格式的功能点（如 PRD 动宾短语）返回 None。
+    """
+    m = _API_OP_RE.match(feature_name.strip())
+    if not m:
+        return None
+    segs = [s.strip("{}").lower() for s in m.group(2).split("/") if s.strip("{}")]
+    if not segs:
+        return None
+    return segs[0], set(segs)
+
+
+def _resource_groups(profile: DocumentProfile) -> list[_ResourceGroup]:
+    """按资源（path 首段）对 API 功能点分组，保持文档首次出现顺序。"""
+    groups: list[_ResourceGroup] = []
+    index: dict[str, int] = {}
+    for f in profile.features:
+        parsed = _api_resource(f.name)
+        if parsed is None:
+            continue
+        key, tokens = parsed
+        if key not in index:
+            index[key] = len(groups)
+            groups.append(_ResourceGroup(key=key))
+        group = groups[index[key]]
+        group.tokens.update(tokens)
+        group.features.append(f)
+    return groups
+
+
+def _flow_covered_keys(profile: DocumentProfile, groups: list[_ResourceGroup]) -> set[str]:
+    """主流程已覆盖的资源键：资源的任一接口名出现在主流程步骤文本中。"""
+    flow_text = "\n".join(profile.flows)
+    return {g.key for g in groups if any(f.name in flow_text for f in g.features)}
+
+
+def _resource_boundaries(group: _ResourceGroup, boundaries: list[Boundary]) -> list[Boundary]:
+    """匹配资源的参数边界：边界描述文本包含任一路径词元（如 user → schema User.xxx）。"""
+    return [b for b in boundaries if any(t in b.text.lower() for t in group.tokens)]
+
+
+def _boundary_direction_text(b: Boundary) -> str:
+    """单个边界的数值化预期文本：边界值 + 两侧相邻值 + 方向（接受 / 拒绝 / 触发）。"""
+    value = _fmt_num(b.value)
+    lo = _fmt_num(b.value - 1)
+    hi = _fmt_num(b.value + 1)
+    if b.kind == "range_min":
+        return (
+            f"输入 {value}{b.unit}（恰好达到最小值）被接受，"
+            f"{lo}{b.unit}（少 1）被拒绝并提示，{hi}{b.unit}（多 1）正常通过"
+        )
+    if b.kind == "range_max":
+        return (
+            f"输入 {value}{b.unit}（恰好达到最大值）被接受，"
+            f"{hi}{b.unit}（多 1）被拒绝并提示，{lo}{b.unit}（少 1）正常通过"
+        )
+    return (
+        f"输入 {value}{b.unit}（恰好达到阈值）触发规则处理，"
+        f"{lo}{b.unit}（少 1）未达阈值不触发，{hi}{b.unit}（多 1）触发阈值限制并提示"
+    )
+
+
+def _endpoint_cases(profile: DocumentProfile) -> list[dict]:
+    """规则 6：接口端点补齐（仅 OpenAPI 文档）——评测驱动改进（迭代 4）。
+
+    评测发现 mock 生成集「基准要素重合度」缺口集中在主流程未覆盖的端点资源
+    （如 /user）：既有规则只按文档顺序取前 N 个边界 / 功能点，靠后资源的
+    场景类与参数边界类用例被截断。本规则：
+    1. 按 path 首段分组资源，找出主流程（场景法基本流）未覆盖的资源；
+    2. 每个缺口资源补 1 条「场景法 · 接口」专项（预期引用该资源接口名）；
+    3. 参数边界缺口最大的资源合并补 1 条边界值专项（≤MAX_ENDPOINT_BOUNDARIES
+       个边界，预期含边界值与两侧相邻值），少而精控制用例规模。
+    """
+    if profile.source_type != "openapi":
+        return []
+    groups = _resource_groups(profile)
+    if not groups:
+        return []
+    covered = _flow_covered_keys(profile, groups)
+    gap_groups = [g for g in groups if g.key not in covered]
+    if not gap_groups:
+        return []
+
+    module = profile.module
+    cases: list[dict] = []
+    for group in gap_groups[:MAX_ENDPOINT_SCENARIOS]:
+        names = "、".join(f"「{f.name}」" for f in group.features[:2])
+        call_lines = "\n".join(
+            f"{i}. 调用「{f.name}」并记录响应状态与响应体"
+            for i, f in enumerate(group.features[:3], 2)
+        )
+        cases.append(
+            {
+                "title": f"【场景法】{group.key} 资源接口主流程专项：{group.features[0].name}",
+                "precondition": f"接口服务可用，{group.key} 资源测试数据已准备就绪",
+                "steps": f"1. 准备{group.key} 资源的合法测试数据\n{call_lines}\n3. 校验资源状态与响应数据",
+                "expected": (
+                    f"依次调用{names}完成{group.key} 资源接口主流程：各接口响应状态与接口定义一致，"
+                    f"资源数据正确写入并通过查询校验"
+                ),
+                "priority": "P1",
+                "category": "接口",
+                "method": "场景法",
+                "module": f"{module}/场景验证",
+            }
+        )
+
+    # 参数边界专项：投给缺口最大的资源（按未覆盖边界数降序、文档顺序取先）
+    selected = set(id(b) for b in profile.boundaries[:MAX_BOUNDARIES])
+    def _gap_size(group: _ResourceGroup) -> int:
+        return sum(1 for b in _resource_boundaries(group, profile.boundaries) if id(b) not in selected)
+
+    target = max(gap_groups, key=_gap_size)
+    uncovered = [b for b in _resource_boundaries(target, profile.boundaries) if id(b) not in selected]
+    if uncovered:
+        merged = uncovered[:MAX_ENDPOINT_BOUNDARIES]
+        parts = "；".join(f"「{b.text}」：{_boundary_direction_text(b)}" for b in merged)
+        cases.append(
+            {
+                "title": (
+                    f"【边界值】{target.key} 资源参数边界专项 - "
+                    + "、".join(b.text for b in merged)
+                ),
+                "precondition": f"接口服务可用，{target.key} 资源接口可正常调用",
+                "steps": (
+                    f"1. 准备{target.key} 资源接口的参数边界测试数据\n"
+                    "2. 分别提交边界值与两侧相邻值参数\n"
+                    "3. 校验接口响应与参数校验提示"
+                ),
+                "expected": parts,
+                "priority": "P1",
+                "category": "边界",
+                "method": "边界值",
+                "module": f"{module}/边界验证",
+            }
+        )
+    return cases
+
+
 def _concrete_anchor(profile: DocumentProfile) -> str:
     """从文档要点中取一个具体锚点（功能点 / 流程步骤 / 边界），供补齐用例引用（UP-3）。
 
@@ -366,6 +530,9 @@ def generate(profile: DocumentProfile) -> list[dict]:
 
     # 规则 5：多条件组合 → 判定表用例
     raw_cases.extend(_decision_table_cases(profile))
+
+    # 规则 6：接口端点补齐（仅 OpenAPI）——补齐主流程未覆盖资源的场景 / 边界专项
+    raw_cases.extend(_endpoint_cases(profile))
 
     # 规则 5：数量与覆盖度补齐
     return _pad_cases(raw_cases, profile)

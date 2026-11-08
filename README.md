@@ -1,5 +1,7 @@
 # CasePilot
 
+[![CI](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml/badge.svg)](https://github.com/qpqpalalzmzm112/CasePilot/actions/workflows/ci.yml) [![coverage](https://img.shields.io/badge/coverage-96.13%25-brightgreen)](https://github.com/qpqpalalzmzm112/CasePilot)
+
 > 中文需求文档 / OpenAPI 接口文档 → 按测试方法论生成结构化测试用例 → 导出禅道 Excel / pytest 骨架 / Markdown
 
 CasePilot 是一个开源的 AI 测试用例生成 CLI 工具，面向中文测试工作流设计。它把需求文档或接口文档解析为结构化要点，按经典测试方法论（等价类划分、边界值分析、场景法、判定表）生成带**显式方法论标注**的测试用例，并直接导出可导入禅道的 Excel 用例表。
@@ -184,6 +186,9 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
    （主流程步骤文本与文档中的边界值，如「触发「连续错误 5 次」（5次）限制时按需求规则处理」）
 4. 优先级规则：主流程 P0、有效等价类与边界 P1、异常 / 无效类 P2
 5. 多条件组合 → **判定表**用例；并保证每文档 ≥8 条用例、method 覆盖 ≥3 种、category 覆盖 ≥3 种
+6. 接口端点补齐（仅 OpenAPI，迭代 4 新增）：主流程未覆盖的资源（按 path 首段分组，如 `/user`）各补 1 条
+   **场景法 · 接口**专项；参数边界缺口最大的资源合并补 1 条**边界值**专项（引用具体边界值与两侧相邻值），
+   补齐 `/user` 类端点覆盖而不灌水用例规模
 
 ### LLM 输出质量门禁
 
@@ -197,7 +202,7 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
 | 样例 | 说明 | 生成规模（mock 模式） |
 | --- | --- | --- |
 | `examples/prd_login.md` | 中文登录需求：验证码、连续错误 5 次锁定 30 分钟、密码 8-20 位等边界 | 27 条，method 4 种 / category 3 种 |
-| `examples/openapi_petstore.yaml` | OpenAPI 3.0 petstore：`/pet`、`/pet/{petId}`、`/store/order`、`/user`，含 schema 约束 | 27 条，method 4 种 / category 4 种 |
+| `examples/openapi_petstore.yaml` | OpenAPI 3.0 petstore：`/pet`、`/pet/{petId}`、`/store/order`、`/user`，含 schema 约束 | 30 条，method 4 种 / category 4 种 |
 | `examples/prd_boundary.md` | 纯边界值场景：优惠券满 100 减 20、单次最多 50 件等大量数字边界 | 25 条，method 4 种 / category 3 种 |
 
 三个样例均可无 key、无 Ollama 的纯离线环境跑通，生成结果结构合法率 100%；
@@ -221,9 +226,9 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
 
 | 样例 | 总分 | 说明 |
 | --- | --- | --- |
-| prd_login | 100.0 / 100 | 4 维全满分 |
-| prd_boundary | 100.0 / 100 | 4 维全满分 |
-| openapi_petstore | 97.4 / 100 | 基准要素重合度 89.5%（mock 未覆盖 `/user` 接口三元组，报告给出改进建议） |
+| prd_login | 100.0 / 100 | 4 维全满分（17/17 三元组覆盖） |
+| prd_boundary | 100.0 / 100 | 4 维全满分（18/18 三元组覆盖） |
+| openapi_petstore | 100.0 / 100 | 4 维全满分（19/19 三元组覆盖）；迭代 4 评测驱动补齐 `/user` 端点用例前为 97.4（重合度 17/19，89.5%） |
 
 ### `casepilot judge`：LLM-as-a-Judge 用例质量自评
 
@@ -233,17 +238,179 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
 无 key 降级为可解释规则评分（如「预期结果为空 → 完整性 1 分」）。
 
 实测（mock 规则降级模式，确定性）：`output/prd_login_cases.xlsx`（27 条）总分 **4.9 / 5**；
-构造的坏用例集（缺预期结果 + 优先级全 P0）总分 **1.5 / 5**，分差 3.4，且针对性建议
-（如「用例「验证登录」的完整性被判低分：预期结果为空…」「用例集优先级问题：优先级全部为 P0…」）。
+构造的坏用例集（6 条：缺预期结果 + 优先级全 P0）总分 **2.0 / 5**，分差 2.9，且给出针对性建议
+（如「用例「验证登录0」的完整性被判低分：预期结果为空…」「用例集优先级问题：优先级全部为 P0…」）。
+
+## 效果实测与演示（迭代 4）
+
+### 效果对比表（mock 模式生成质量量化）
+
+以下数字全部由本仓库命令直接产出（mock 确定性模式，同输入同分数 / 同输出），可逐条复现：
+
+| 指标 | 实测数值 | 评测方法（复现命令） |
+| --- | --- | --- |
+| prd_login 评测总分 | 100.0 / 100（4 维全满分） | `casepilot eval -i examples/prd_login.md` |
+| prd_boundary 评测总分 | 100.0 / 100（4 维全满分） | `casepilot eval -i examples/prd_boundary.md` |
+| openapi_petstore 评测总分 | 100.0 / 100（4 维全满分） | `casepilot eval -i examples/openapi_petstore.yaml` |
+| 基准要素重合度（petstore） | 89.5%（17/19）→ **100%（19/19）** | 同上；对比为迭代 4「接口端点补齐」规则改进前后 |
+| 边界数值化率 | 100%（petstore 11/11、prd_login 10/10） | 评测维度 3（同上命令） |
+| judge 好例总分 | **4.9 / 5** | `casepilot judge output/prd_login_cases.xlsx` |
+| judge 坏例总分 | **2.0 / 5**（与好例分差 2.9） | 人工构造坏用例集（6 条，缺预期结果 + 优先级全 P0）后 `casepilot judge` |
+| pytest 测试与覆盖率 | 332 项测试通过，覆盖率 **96.13%**（门禁 ≥80%） | `pytest --cov=casepilot --cov=evals --cov-fail-under=80` |
+
+### 快速上手演示实录（gen → judge → eval 闭环）
+
+以下为真实终端输出转录（无 key 离线环境，mock 模式，逐条复跑输出一致）：
+
+① 生成禅道导入 Excel（`gen`）：
+
+```text
+$ casepilot gen -i examples/prd_login.md
+正在解析输入文档：examples\prd_login.md
+解析完成：模块「用户登录模块需求文档」，功能点 / 接口 6 个，数字边界 10 个，主流程步骤 5 步
+当前 LLM 模式：mock（无 API key 且本地 Ollama 不可达，已降级为确定性规则引擎，纯离线生成）
+已生成 27 条用例（全部通过 pydantic 结构校验）
+覆盖维度检查：共 27 条用例
+  - 用例数量 27 条，下限 8 条（达标）
+  - 方法论覆盖 4 种（边界值、等价类、场景法、判定表），下限 3 种（达标）
+  - 用例类型覆盖 3 种（边界、功能、异常），下限 3 种（达标）
+  - 方法论标注非空：27 / 27 条（达标）
+覆盖维度检查结论：达标
+共生成 27 条用例，正在导出 xlsx 格式…
+导出完成：output\prd_login_cases.xlsx（共 27 条用例）
+禅道导入前校验：output\prd_login_cases.xlsx
+  - Sheet「用例」存在，表头 8 列与官方导入模板一致
+  - 数据行 27 行，必填字段完整
+  - 优先级取值全部合法（1/2/3/4）
+校验结论：可导入
+```
+
+② LLM-as-a-Judge 用例质量自评（`judge`）：
+
+```text
+$ casepilot judge output/prd_login_cases.xlsx -o output/judge_report_prd_login.md
+# 用例质量评审报告（LLM-as-a-Judge）
+
+- 评审对象：output\prd_login_cases.xlsx（27 条用例）
+- 评审模式：规则降级（无 API key 且本地 Ollama 不可达，采用可解释离线规则评分）
+- 评分口径：各维度 1-5 分（5 为最佳），总分 = 4 个维度平均分（1-5），百分制 = 总分 × 20
+
+## 总分：4.9 / 5（百分制 98）
+
+## 维度得分
+
+| 维度 | 得分 | 一句话解读 |
+| --- | --- | --- |
+| 完整性 | 4.6 | 17/27 条用例 8 要素非空且具体 |
+| 方法论标注合理性 | 5.0 | 27/27 条用例方法论标注合法且与内容相符 |
+| 优先级合理性 | 5.0 | 3 档优先级分布合理，P0 保留给核心路径 |
+| 可执行性 | 5.0 | 27/27 条用例步骤可执行且预期含判定标准 |
+
+## 改进建议
+
+1. 用例「【边界值】- 支持记住登录状态 7 天 - 取边界值恰好达到阈值 7天」的完整性被判低分：前置条件含通用套话（如「系统处于功能可用状态」），判定标准不够具体；建议补齐空缺要素，并写明可校验的具体内容
+2. 用例「【边界值】- 支持记住登录状态 7 天 - 取越界值阈值相邻值 6天 / 8天」的完整性被判低分：前置条件含通用套话（如「系统处于功能可用状态」），判定标准不够具体；建议补齐空缺要素，并写明可校验的具体内容
+3. 用例「【边界值】- 密码长度 8-20 位 - 取边界值最小值 8位」的完整性被判低分：前置条件含通用套话（如「系统处于功能可用状态」），判定标准不够具体；建议补齐空缺要素，并写明可校验的具体内容
+
+评审报告已保存：output\judge_report_prd_login.md
+```
+
+③ 评测生成质量（`eval`，对照 golden 基准集 4 维评分）：
+
+```text
+$ casepilot eval -i examples/openapi_petstore.yaml
+正在解析输入文档：examples\openapi_petstore.yaml
+解析完成：模块「Petstore 宠物商店接口」，功能点 / 接口 6 个，数字边界 14 个，主流程步骤 3 步
+已生成 30 条用例（全部通过 pydantic 结构校验）
+覆盖维度检查：共 30 条用例
+  - 用例数量 30 条，下限 8 条（达标）
+  - 方法论覆盖 4 种（边界值、等价类、场景法、判定表），下限 3 种（达标）
+  - 用例类型覆盖 4 种（边界、接口、异常、功能），下限 3 种（达标）
+  - 方法论标注非空：30 / 30 条（达标）
+覆盖维度检查结论：达标
+# 评测报告：examples\openapi_petstore.yaml
+
+- 输入文档：examples\openapi_petstore.yaml
+- 基准集：...\evals\datasets\openapi_petstore_golden.json（19 条人工整理基准用例）
+- 生成用例：30 条（生成模式：mock）
+- **总分：100.0 / 100**（口径：4 个维度等权平均 × 100，各维度 0-1）
+
+## 维度得分
+
+| 维度 | 得分 | 一句话解读 |
+| --- | --- | --- |
+| 结构合法率 | 100.0% | 30/30 条用例通过 pydantic 结构校验 |
+| 方法论覆盖率 | 100.0% | 基准要求 4 种方法论，生成集覆盖 4 种 |
+| 边界数值化率 | 100.0% | 11/11 条边界值用例的预期结果含具体数值 |
+| 基准要素重合度 | 100.0% | 19/19 条基准用例的「模块+方法论+类型」三元组被生成集覆盖 |
+
+## 改进建议
+
+无：4 个维度全部满分，生成集与基准集完全对齐。
+
+评分报告已保存：output\eval_report_openapi_petstore.md
+```
+
+> 注：`eval` 报告中的「基准集」为本机绝对路径，转录时省略路径前缀，其余输出逐字一致。
+
+④ OpenAPI 一键导出 pytest 脚本骨架（`api`）：
+
+```text
+$ casepilot api -i examples/openapi_petstore.yaml --emit pytest
+正在解析输入文档：examples\openapi_petstore.yaml
+解析完成：模块「Petstore 宠物商店接口」，功能点 / 接口 6 个，数字边界 14 个，主流程步骤 3 步
+已生成 30 条用例（全部通过 pydantic 结构校验）
+覆盖维度检查：共 30 条用例
+  - 用例数量 30 条，下限 8 条（达标）
+  - 方法论覆盖 4 种（边界值、等价类、场景法、判定表），下限 3 种（达标）
+  - 用例类型覆盖 4 种（边界、接口、异常、功能），下限 3 种（达标）
+  - 方法论标注非空：30 / 30 条（达标）
+覆盖维度检查结论：达标
+当前 LLM 模式：mock（无 API key 且本地 Ollama 不可达，已降级为确定性规则引擎，纯离线生成）
+共生成 30 条用例，正在导出 pytest 格式…
+导出完成：output\openapi_petstore_test_skeleton.py（共 30 条用例）
+```
+
+⑤ 全量测试 + 覆盖率门禁（与 CI 相同命令）：
+
+```text
+$ pytest --cov=casepilot --cov=evals --cov-fail-under=80
+...
+------------------------------------------------------------
+TOTAL                                     1448     56    96%
+Required test coverage of 80% reached. Total coverage: 96.13%
+332 passed in 12.72s
+```
+
+> 注：pytest 尾部两行为稳定输出（测试数 332、总覆盖率 96.13%），耗时随运行环境浮动。
+
+### 面试讲解要点（3 个问答锚点）
+
+**① 设计取舍：为什么做「LLM 网关双模式 + 确定性 mock」？**
+回答锚点：求职项目要能被面试官当场跑起来，所以降级链路（openai → ollama → mock）保证无 key 也能完整演示；
+mock 是确定性规则引擎（同输入同输出），使 eval 评测分数可复现、可回归——评测基线稳定比“看起来智能”更重要；
+规则引擎也强制显式方法论标注，保住产品核心差异化。规模上取「少而精」：单文档生成规模设上限，拒绝用例灌水。
+
+**② 幻觉处理：LLM 生成用例如何防幻觉 / 保证结构？**
+回答锚点：三层防线——① pydantic v2 结构化校验（枚举 / 必填 / 禁止未知字段），非法输出直接拒绝；
+② 解析 / 校验失败自动重试（错误信息回灌提示词，≤2 次）；③ 生成后覆盖维度检查 + golden 评测 + LLM-as-a-Judge 兜底。
+mock 模式则从源头杜绝幻觉：全部用例内容锚定输入文档的具体词 / 数值（tests/test_mock_concrete.py 以 ≥80% 门禁断言）。
+
+**③ 质量评估：怎么证明生成的用例质量？**
+回答锚点：量化 + 双评审。离线 eval 4 维评分（结构合法率 / 方法论覆盖率 / 边界数值化率 / 基准要素重合度，
+对照人工整理 golden 基准集，3 样例实测 100.0）；LLM-as-a-Judge 逐条评审（好例 4.9 / 5 vs 坏例 2.0 / 5，分差 2.9）；
+工程侧 332 项 pytest + 96.13% 覆盖率 + CI 门禁。改进流程用评测驱动：本轮就是靠 eval 差距明细（17/19 → 补齐 `/user` 端点）实现 19/19。
 
 ## 开发与测试
 
 ```bash
-# 运行测试 + 覆盖率门禁（≥80%）
+# 运行测试 + 覆盖率门禁（≥80%，与 CI 完全相同的命令）
 .venv\Scripts\python -m pytest --cov=casepilot --cov=evals --cov-fail-under=80
 ```
 
-- 测试全部离线可跑（HTTP 全部替身 mock），覆盖：schema 校验、网关模式决策、PRD / OpenAPI 解析、mock 生成器确定性与方法论覆盖、Excel 列结构断言、CLI（typer CliRunner）、4 维评分器好 / 坏输入分数方向、golden 加载校验、judge 双模式（含 LLM 解析失败重试）、等价类 / 场景法预期结果具体值比例门禁（≥80%）
+- GitHub Actions CI（`.github/workflows/ci.yml`）在 push / PR 触发，Python 3.10 / 3.12 矩阵执行同一命令；
+  仅用 `actions/checkout` 与 `actions/setup-python` 官方 action，不引入第三方覆盖率上传服务（徽章用 shields.io 静态样式）
+- 测试全部离线可跑（HTTP 全部替身 mock），覆盖：schema 校验、网关模式决策、PRD / OpenAPI 解析、mock 生成器确定性与方法论覆盖、Excel 列结构断言、CLI（typer CliRunner）、4 维评分器好 / 坏输入分数方向、golden 加载校验、judge 双模式（含 LLM 解析失败重试）、等价类 / 场景法预期结果具体值比例门禁（≥80%）、`/user` 端点补齐与 golden 三元组全覆盖、CI workflow YAML 关键字段断言
 - 开发依赖仅 `pytest`、`pytest-cov`；运行时依赖仅 `typer`、`pydantic>=2`、`openpyxl`、`pyyaml`、`httpx`
 
 ## 项目结构
@@ -272,6 +439,7 @@ evals/
   datasets/              # 3 个人工整理的 golden 基准集（JSON，含设计理由 note）
 docs/
   zentao_import.md       # 禅道导入操作指南 + 人工验证清单
+  best_practices.md      # 最佳实践（输入文档写法 / 方法论选择 / 禅道工作流 / 双模式配置 / 评测集维护）
 examples/                # 3 个离线固定样例
 tests/                   # pytest 测试套件
 ```
@@ -280,7 +448,8 @@ tests/                   # pytest 测试套件
 
 - **迭代 2（已完成）**：pytest 脚本骨架导出、Markdown 导出、禅道导入前校验与导入指南、LLM 输出失败自动重试、质量门禁雏形（覆盖维度检查 / 边界值预期结果数值化）
 - **迭代 3（已完成）**：LLM-as-a-Judge 用例质量自评（双模式）、evals 评测集与 4 维评分框架、等价类 / 场景法预期结果引用输入具体值
-- **迭代 4**：MCP 形态接入、CI 与徽章
+- **迭代 4（已完成）**：GitHub Actions CI（pytest + 覆盖率门禁 + Python 3.10 / 3.12 矩阵）与覆盖率徽章、评测驱动改进 mock 引擎（补齐 `/user` 端点覆盖，petstore eval 97.4 → 100.0）、效果对比表 / 演示实录 / 面试讲解要点、最佳实践文档（[docs/best_practices.md](docs/best_practices.md)）
+- **迭代 5**：MCP 形态接入
 
 ## 已知限制
 
