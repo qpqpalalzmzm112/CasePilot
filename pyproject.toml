@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "casepilot"
-version = "0.1.0"
+version = "1.0.0"
 description = "CasePilot：中文需求文档 / OpenAPI 文档 → 结构化测试用例 → 禅道 Excel 的 AI 测试用例生成 CLI"
 readme = "README.md"
 requires-python = ">=3.10"
