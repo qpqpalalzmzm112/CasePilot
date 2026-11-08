@@ -85,6 +85,7 @@ class FRCoverageReport:
     items: list[FRCoverageItem] = field(default_factory=list)
     case_count: int = 0  # 对账 + 补齐后的用例总数
     added_cases: int = 0  # 自动补齐新增的用例数
+    auto_numbered: bool = False  # True=原文档无编号，需求清单为自动编号兜底
 
     @property
     def total(self) -> int:
@@ -127,7 +128,8 @@ def _fr_backfill_cases(fr: FRItem, module: str) -> list[TestCase]:
     """缺漏 FR 的基础用例补齐：有效类 + 异常类各 1 条，method 按 FR 内容选方法论。
 
     FR 含安全 / 性能类需求词时标注「安全测试 / 性能测试」，其余用等价类；
-    预期结果引用需求摘要并给出明确判定标准（不含模糊词）。
+    预期结果引用需求原文条款并给出明确判定标准（不含模糊词）；
+    步骤与预期的每个断言片段均引用条款原文（迭代 7 幻觉溯源：不引入 PRD 外规则）。
     """
     method = mock_engine.classify_requirement(fr.text, fr.section) or "等价类"
     summary = _fr_summary(fr.text)
@@ -136,13 +138,13 @@ def _fr_backfill_cases(fr: FRItem, module: str) -> list[TestCase]:
             title=f"{fr.tag} 【{method}】{summary} - 有效类验证（自动补齐）",
             precondition=f"已满足「{summary}」的基本使用条件，测试数据已准备就绪",
             steps=(
-                f"1. 准备满足「{summary}」的合法输入数据\n"
-                "2. 执行对应操作\n"
-                "3. 观察系统响应与最终状态"
+                f"1. 按条款「{summary}」准备合法输入数据\n"
+                f"2. 执行「{summary}」对应操作\n"
+                f"3. 观察结果并核对条款「{summary}」"
             ),
             expected=(
-                f"系统成功处理「{summary}」的有效输入：处理成功，"
-                f"返回结果与「{summary}」的需求定义一致，数据正确生效"
+                f"条款「{summary}」：系统接受有效输入并处理成功；"
+                f"条款「{summary}」：返回结果与条款「{summary}」的需求定义一致"
             ),
             priority="P1",
             category="功能",
@@ -153,13 +155,14 @@ def _fr_backfill_cases(fr: FRItem, module: str) -> list[TestCase]:
             title=f"{fr.tag} 【{method}】{summary} - 异常类验证（自动补齐）",
             precondition=f"已满足「{summary}」的基本使用条件，测试数据已准备就绪",
             steps=(
-                f"1. 准备违反「{summary}」的非法输入数据\n"
-                "2. 执行对应操作\n"
-                "3. 观察系统响应与校验提示"
+                f"1. 按条款「{summary}」准备非法输入数据\n"
+                f"2. 执行「{summary}」对应操作\n"
+                f"3. 观察校验结果并核对条款「{summary}」"
             ),
             expected=(
-                f"系统拒绝「{summary}」的无效输入：校验不通过并给出明确中文错误提示，"
-                "数据不被写入"
+                f"条款「{summary}」：系统拒绝「{summary}」的无效输入；"
+                f"条款「{summary}」：无效输入不被执行；"
+                f"条款「{summary}」：返回结果与条款「{summary}」的需求定义一致"
             ),
             priority="P2",
             category="异常",
@@ -202,26 +205,41 @@ def reconcile_fr_coverage(
                 FRCoverageItem(fr_id=fr.id, summary=_fr_summary(fr.text), count=len(backfill), filled=True)
             )
     return work, FRCoverageReport(
-        source=profile.source, items=items, case_count=len(work), added_cases=added
+        source=profile.source,
+        items=items,
+        case_count=len(work),
+        added_cases=added,
+        auto_numbered=bool(profile.frs) and all(fr.auto for fr in profile.frs),
     )
 
 
 def format_fr_coverage_report(report: FRCoverageReport) -> str:
-    """把 FR 对账结果渲染为全中文 Markdown 报告（确定性，不含时间戳）。"""
+    """把 FR 对账结果渲染为全中文 Markdown 覆盖率核对表（确定性，不含时间戳）。
+
+    核对表列：编号（逐字引用 PRD 原文编号）| 原文摘要 | 覆盖用例数 | ✓/已补齐；
+    编号来源说明区分「原文编号」与「自动编号兜底」两种情况（迭代 7 / UP-1）。
+    """
     lines = [
         f"# FR 需求对账报告：{Path(report.source).name}",
         "",
         f"- 输入文档：{report.source}",
-        f"- FR 条目：{report.total} 条；对账后用例：{report.case_count} 条",
+        f"- 需求条目：{report.total} 条；对账后用例：{report.case_count} 条",
+        (
+            "- 编号说明：本文档未识别到原文编号，需求清单采用自动编号兜底"
+            "（FR-auto-1…，用例标题追溯前缀与自动编号一致）"
+            if report.auto_numbered
+            else "- 编号说明：编号逐字引用 PRD 原文编号（FR / NFR 分层），"
+            "用例标题追溯前缀与原文编号逐字一致"
+        ),
         "",
-        "## FR 覆盖清单",
+        "## 覆盖率核对表",
         "",
-        "| FR 编号 | 需求摘要 | 覆盖用例数 | 状态 |",
+        "| 编号 | 原文摘要 | 覆盖用例数 | 状态 |",
         "| --- | --- | --- | --- |",
     ]
     for item in report.items:
         status = "已补齐" if item.filled else "✓"
-        lines.append(f"| FR-{item.fr_id} | {item.summary} | {item.count} | {status} |")
+        lines.append(f"| {item.fr_id} | {item.summary} | {item.count} | {status} |")
     lines.append("")
     lines.append(report.summary_line())
     return "\n".join(lines)

@@ -22,6 +22,7 @@ from typing import Optional
 import httpx
 
 from . import mock_engine
+from . import quality
 from .methodology import build_system_prompt, build_user_prompt
 from .schema import DocumentProfile, LLMMode, validate_cases
 
@@ -167,9 +168,12 @@ class LLMGateway:
     def generate_raw_cases(self, profile: DocumentProfile) -> list[dict]:
         """生成用例原始 dict 列表；mock 模式走确定性规则引擎。
 
-        真实 LLM 模式带质量门禁：JSON 解析 / 结构校验失败时自动重试
-        （≤ CASEPILOT_LLM_MAX_RETRIES 次，每次把错误信息回灌提示词），
-        仍失败抛出清晰中文错误。
+        真实 LLM 模式带两道质量门禁（迭代 7 / UP-3）：
+        1. JSON 解析 / 结构校验失败自动重试；
+        2. 模糊词门禁拒绝——预期结果命中模糊词视为校验失败，把
+           「预期结果含模糊词 X，请改写为可验证的确定性表述」回灌提示词重试
+           （合计 ≤ CASEPILOT_LLM_MAX_RETRIES 次）；重试耗尽仍命中的用例
+           丢弃并输出中文告警（标题 + 命中词），全部丢弃时抛出清晰中文错误。
         """
         if self.mode == "mock":
             return mock_engine.generate(profile)
@@ -183,8 +187,9 @@ class LLMGateway:
 
         max_retries = get_max_retries()
         last_error: Optional[ValueError] = None
+        last_parsed: Optional[list[dict]] = None
         for attempt in range(max_retries + 1):
-            # 重试时把上一次错误信息回灌到提示词，引导模型修正输出
+            # 重试时把上一次错误信息（含模糊词命中明细）回灌到提示词
             prompt = user
             if last_error is not None:
                 prompt = (
@@ -196,13 +201,33 @@ class LLMGateway:
             try:
                 raw_cases = parse_cases_json(content)
                 validate_cases(raw_cases)  # 结构校验失败同样触发自动重试
-                return raw_cases
             except ValueError as exc:
                 last_error = exc
                 if attempt < max_retries:
                     logger.warning(
                         "LLM 输出解析 / 校验失败（第 %d 次自动重试）：%s", attempt + 1, exc
                     )
+                continue
+            last_parsed = raw_cases
+            violations = quality.check_fuzzy_gate(raw_cases)
+            if not violations:
+                return raw_cases
+            # 模糊词门禁拒绝：命中即校验失败，回灌重试
+            last_error = ValueError(quality.build_fuzzy_feedback(violations))
+            if attempt < max_retries:
+                logger.warning("模糊词门禁拒绝（第 %d 次自动重试）：%s", attempt + 1, last_error)
+
+        # 重试耗尽：解析成功过的输出按门禁丢弃仍含模糊词的用例并中文告警
+        if last_parsed is not None:
+            kept, warnings = quality.drop_fuzzy_cases(last_parsed)
+            for line in warnings:
+                logger.warning(line)
+            if kept:
+                return kept
+            raise ValueError(
+                "模糊词门禁：重试耗尽后全部用例的预期结果仍含模糊词，已全部丢弃；"
+                "请改写为可验证的确定性表述（具体状态 / 提示语 / 数值）后重新生成"
+            )
         raise ValueError(
             f"LLM 输出解析 / 校验连续失败，已自动重试 {max_retries} 次仍不成功；"
             f"最后一次错误：{last_error}"

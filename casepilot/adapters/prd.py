@@ -1,11 +1,14 @@
-"""中文 PRD 文本解析：提取功能点、数字边界、主流程与 FR 清单。
+"""中文 PRD 文本解析：提取功能点、数字边界、主流程与 FR/NFR 需求清单。
 
 解析策略（确定性规则，不依赖任何外部服务）：
 - 功能点：功能清单 / 特性类小节下的列表项，或「支持 / 允许 / 提供 …」动宾短语句
 - 数字边界：带单位的数字（8-20 位、5 次、30 分钟）与比较词（至少 / 不超过 / 超过 / 满 等）
 - 主流程：「主流程 / 基本流 / 核心流程」小节下的编号步骤；缺失时按功能点合成
-- FR 清单（迭代 6 需求对账）：优先识别显式编号（FR-1.1 / 1.2 / 需求1 等形式），
-  无显式编号时按功能点自动编号（FR-1、FR-2…）；同时记录条目所在小节，
+- FR/NFR 需求清单（迭代 7 对账返工）：抽取「带原始编号的需求清单」——
+  识别 FR/NFR 分层编号（FR-1.1 / FR-2.3 / NFR-1.2 / 需求1 / R2 / 1.4 等形式，
+  含中英文冒号 / 顿号后缀），编号逐字保留原文（大小写、分隔符不改写），
+  每条记录原文条款文本；仅当文档没有任何原文编号时才允许自动编号兜底
+  （FR-auto-1…，对账报告注明「自动编号」）。条目所在小节同步记录，
   供安全 / 性能类需求的语境判定使用
 """
 
@@ -40,14 +43,20 @@ _FLOW_SECTION_RE = re.compile(r"主流程|基本流|核心流程|操作流程|�
 # 动宾短语兜底识别
 _ACTION_LINE_RE = re.compile(r"^\s*(支持|允许|提供|可以|能够|用户可以)")
 
-# 显式 FR 编号（迭代 6 需求对账）：FR-1.1 / 需求1 / R2 等前缀形式
-_EXPLICIT_FR_PREFIX_RE = re.compile(r"^(?:FR|需求|R)[-\s]?(\d+(?:\.\d+)*)[：:、.．\s]+(.+)$")
-# 显式 FR 编号：1.2 / 3.1.4 等至少两级的层级编号形式（"1. 步骤"类一级编号不算）
-_EXPLICIT_FR_HIER_RE = re.compile(r"^(\d+\.\d+(?:\.\d+)*)[：:、.．\s]+(.+)$")
+# 显式需求编号（迭代 7 对账返工）：FR-1.1 / NFR-1.2 / 需求3 / R2 等前缀形式，
+# 编号逐字保留原文（大小写、分隔符不改写），后缀允许中英文冒号 / 顿号 / 空格
+_EXPLICIT_FR_PREFIX_RE = re.compile(
+    r"^((?:NFR|FR|需求|R)[-\s]?\d+(?:\.\d+)*)(?:[：:、.．)]|\s)+(.+)$", re.IGNORECASE
+)
+# 显式需求编号：1.2 / 3.1.4 等至少两级的层级编号形式（"1. 步骤"类一级编号不算）
+_EXPLICIT_FR_HIER_RE = re.compile(r"^(\d+\.\d+(?:\.\d+)*)(?:[：:、.．)]|\s)+(.+)$")
 
 
 def _match_explicit_fr(text: str) -> re.Match | None:
-    """识别显式 FR 编号条目，返回（编号, 需求文本）的匹配；无编号返回 None。"""
+    """识别显式需求编号条目，返回（原文编号, 需求文本）的匹配；无编号返回 None。
+
+    编号（group 1）逐字保留原文，不做任何大小写 / 分隔符改写（迭代 7）。
+    """
     return _EXPLICIT_FR_PREFIX_RE.match(text) or _EXPLICIT_FR_HIER_RE.match(text)
 
 
@@ -189,9 +198,13 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
             deduped_b.append(b)
     boundaries = deduped_b
 
-    # FR 清单兜底（迭代 6 需求对账）：无显式编号时按功能点自动编号 FR-1、FR-2…
+    # 需求清单兜底（迭代 7 对账返工）：无任何原文编号时才允许自动编号，
+    # 编号为 FR-auto-1…（auto=True），对账报告中注明「自动编号」
     if not fr_items:
-        fr_items = [FRItem(id=str(i), text=f.name, section=f.section) for i, f in enumerate(features, 1)]
+        fr_items = [
+            FRItem(id=f"FR-auto-{i}", text=f.name, section=f.section, auto=True)
+            for i, f in enumerate(features, 1)
+        ]
 
     # 主流程缺失时，按功能点合成（保证场景法用例可生成）
     if not flows:

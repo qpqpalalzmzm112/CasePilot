@@ -94,8 +94,9 @@ def _fmt_num(value: float) -> str:
 def _boundary_cases(b: Boundary, module: str) -> list[dict]:
     """规则 1：数字边界 → 边界值用例（边界值本身 P1、边界 ±1 P2）。
 
-    预期结果必须引用具体数值与两侧相邻值（v-1 / v / v+1）并写明方向
-    （接受 / 拒绝 / 触发），不得使用通用套话（UP-3 质量门禁）。
+    步骤与预期结果只允许引用 PRD 条款要素（b.text 原文）与标准测试推导值
+    （边界 ±1 相邻值）并写明方向（接受 / 拒绝 / 触发），每个断言片段均带
+    条款引用，不引入 PRD 之外的规则与后果（迭代 7 幻觉溯源：清除编造规则模板）。
     安全 / 性能类需求的边界不再硬套「边界值」标注，改标专项方法论（迭代 6）。
     """
     # 专项方法论标注：安全 / 性能类需求 → 安全测试 / 性能测试，其余保持边界值
@@ -104,40 +105,38 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
     unit = b.unit
     lo = _fmt_num(b.value - 1)
     hi = _fmt_num(b.value + 1)
+    cite = f"条款「{b.text}」"
     if b.kind == "range_min":
-        inside, outside = b.value, b.value - 1
-        inside_desc, outside_desc = f"最小值 {_fmt_num(inside)}{unit}", f"低于最小值 {_fmt_num(outside)}{unit}"
+        inside_desc, outside_desc = f"最小值 {value}{unit}", f"低于最小值 {lo}{unit}"
         inside_expected = (
-            f"输入 {value}{unit}（恰好达到最小值）时被接受，校验通过并正常处理；"
-            f"两侧相邻值方向：输入 {lo}{unit}（少 1）被拒绝并提示，输入 {hi}{unit}（多 1）正常通过"
+            f"{cite}：输入 {value}{unit}（恰好达到最小值）时被接受，输入 {hi}{unit}（多 1）被接受；"
+            f"{cite}：输入 {lo}{unit}（少 1）被拒绝"
         )
         outside_expected = (
-            f"输入 {lo}{unit}（低于最小值 {value}{unit}）时被拒绝并给出明确中文提示；"
-            f"两侧相邻值对照：输入 {value}{unit}（最小值）被接受，输入 {hi}{unit}（多 1）正常通过"
+            f"{cite}：输入 {lo}{unit}（低于最小值 {value}{unit}）时被拒绝；"
+            f"{cite}：输入 {value}{unit}（最小值）被接受，输入 {hi}{unit}（多 1）被接受"
         )
     elif b.kind == "range_max":
-        inside, outside = b.value, b.value + 1
-        inside_desc, outside_desc = f"最大值 {_fmt_num(inside)}{unit}", f"超过最大值 {_fmt_num(outside)}{unit}"
+        inside_desc, outside_desc = f"最大值 {value}{unit}", f"超过最大值 {hi}{unit}"
         inside_expected = (
-            f"输入 {value}{unit}（恰好达到最大值）时被接受，校验通过并正常处理；"
-            f"两侧相邻值方向：输入 {lo}{unit}（少 1）正常通过，输入 {hi}{unit}（多 1）被拒绝并提示"
+            f"{cite}：输入 {value}{unit}（恰好达到最大值）时被接受，输入 {lo}{unit}（少 1）被接受；"
+            f"{cite}：输入 {hi}{unit}（多 1）被拒绝"
         )
         outside_expected = (
-            f"输入 {hi}{unit}（超过最大值 {value}{unit}）时被拒绝并给出明确中文提示；"
-            f"两侧相邻值对照：输入 {lo}{unit}（少 1）正常通过，输入 {value}{unit}（最大值）被接受"
+            f"{cite}：输入 {hi}{unit}（超过最大值 {value}{unit}）时被拒绝；"
+            f"{cite}：输入 {value}{unit}（最大值）被接受，输入 {lo}{unit}（少 1）被接受"
         )
     else:
-        inside, outside = b.value, b.value - 1
         inside_desc = f"恰好达到阈值 {value}{unit}"
-        outside_desc = f"阈值相邻值 {_fmt_num(outside)}{unit} / {_fmt_num(b.value + 1)}{unit}"
+        outside_desc = f"阈值相邻值 {lo}{unit} / {hi}{unit}"
         inside_expected = (
-            f"输入 {value}{unit}（恰好达到阈值）时被接受并按规则处理；"
-            f"两侧相邻值方向：输入 {lo}{unit}（阈值少 1）未达阈值不触发，"
-            f"输入 {hi}{unit}（阈值多 1）触发阈值限制并提示"
+            f"{cite}：输入 {value}{unit}（恰好达到阈值）时被接受；"
+            f"{cite}：输入 {hi}{unit}（多 1）触发阈值并被拒绝；"
+            f"{cite}：输入 {lo}{unit}（少 1）未达阈值不触发"
         )
         outside_expected = (
-            f"输入 {lo}{unit} 与 {hi}{unit}（阈值 {value}{unit} 的两侧相邻值）按方向分别处理："
-            f"{lo}{unit}（少 1）未达阈值不触发限制，{hi}{unit}（多 1）触发阈值限制被拒绝并提示"
+            f"{cite}：阈值 {value}{unit}，输入 {lo}{unit}（少 1）未达阈值不触发，"
+            f"输入 {hi}{unit}（多 1）触发阈值并被拒绝"
         )
 
     return [
@@ -145,9 +144,9 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
             "title": f"【{method}】{b.text} - 取边界值{inside_desc}",
             "precondition": "系统处于功能可用状态，测试数据已准备就绪",
             "steps": (
-                f"1. 准备满足前置条件的测试数据\n"
-                f"2. 将输入调整为{inside_desc}\n"
-                f"3. 提交操作并观察系统处理"
+                f"1. 按{cite}准备测试数据\n"
+                f"2. 将输入调整为{inside_desc}（{cite}）\n"
+                f"3. 提交操作并观察{cite}的处理结果"
             ),
             "expected": inside_expected,
             "priority": "P1",
@@ -159,9 +158,9 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
             "title": f"【{method}】{b.text} - 取越界值{outside_desc}",
             "precondition": "系统处于功能可用状态，测试数据已准备就绪",
             "steps": (
-                f"1. 准备满足前置条件的测试数据\n"
-                f"2. 将输入调整为{outside_desc}\n"
-                f"3. 提交操作并观察系统处理"
+                f"1. 按{cite}准备测试数据\n"
+                f"2. 将输入调整为{outside_desc}（{cite}）\n"
+                f"3. 提交操作并观察{cite}的处理结果"
             ),
             "expected": outside_expected,
             "priority": "P2",
@@ -175,8 +174,8 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
 def _equivalence_cases(f: Feature, module: str) -> list[dict]:
     """规则 2：功能点 / 接口 → 等价类用例（有效类 P1 + 无效类 P2）。
 
-    预期结果必须引用输入中提取的具体功能点名称（UP-3），
-    不得使用「返回结果符合预期」类纯模板套话。
+    步骤与预期结果只引用功能点 / 接口原文（f.name）等 PRD 条款要素，
+    每个断言片段均带条款引用，不写 PRD 之外的规则与后果（迭代 7 幻觉溯源）。
     安全 / 性能类需求改标专项方法论（迭代 6），标题标记与 method 保持一致。
     """
     valid_category = "接口" if f.kind == "api" else "功能"
@@ -185,32 +184,34 @@ def _equivalence_cases(f: Feature, module: str) -> list[dict]:
         valid_title = f"【等价类】{f.name} - 有效等价类验证"
         invalid_title = f"【等价类】{f.name} - 无效等价类验证"
         valid_expected = (
-            f"系统接受有效等价类输入并成功执行「{f.name}」：功能执行成功，"
-            f"返回结果与「{f.name}」的需求定义一致，数据正确生效"
+            f"条款「{f.name}」：系统接受有效等价类输入并成功执行「{f.name}」；"
+            f"条款「{f.name}」：返回结果与「{f.name}」的需求定义一致"
         )
         invalid_expected = (
-            f"系统拒绝「{f.name}」的无效等价类输入：校验不通过，「{f.name}」不被执行，"
-            f"给出明确中文错误提示，数据不被写入"
+            f"条款「{f.name}」：系统拒绝「{f.name}」的无效等价类输入；"
+            f"条款「{f.name}」：「{f.name}」不被执行；"
+            f"条款「{f.name}」：返回结果与「{f.name}」的拒绝定义一致"
         )
     else:
         valid_title = f"【{method}】{f.name} - 有效输入验证"
         invalid_title = f"【{method}】{f.name} - 异常输入验证"
         valid_expected = (
-            f"系统按「{f.name}」的需求规则处理有效输入：处理成功，"
-            f"返回结果与「{f.name}」的需求定义一致，防护 / 性能规则正确生效"
+            f"条款「{f.name}」：系统按「{f.name}」的需求规则处理有效输入并处理成功；"
+            f"条款「{f.name}」：返回结果与「{f.name}」的需求定义一致"
         )
         invalid_expected = (
-            f"系统拦截「{f.name}」的无效输入：校验不通过，「{f.name}」不被执行，"
-            f"给出明确中文错误提示，数据不被写入"
+            f"条款「{f.name}」：系统拦截「{f.name}」的无效输入；"
+            f"条款「{f.name}」：「{f.name}」不被执行；"
+            f"条款「{f.name}」：返回结果与「{f.name}」的拦截定义一致"
         )
     return [
         {
             "title": valid_title,
             "precondition": f"已满足「{f.name}」的基本使用条件",
             "steps": (
-                f"1. 准备合法有效的输入数据\n"
+                f"1. 按条款「{f.name}」准备合法有效的输入数据\n"
                 f"2. 执行「{f.name}」操作\n"
-                f"3. 观察系统响应与最终状态"
+                f"3. 观察结果并核对条款「{f.name}」"
             ),
             "expected": valid_expected,
             "priority": "P1",
@@ -222,9 +223,9 @@ def _equivalence_cases(f: Feature, module: str) -> list[dict]:
             "title": invalid_title,
             "precondition": f"已满足「{f.name}」的基本使用条件",
             "steps": (
-                f"1. 准备非法 / 缺失 / 超范围的无效输入数据\n"
+                f"1. 按条款「{f.name}」准备非法 / 缺失 / 超范围的无效输入数据\n"
                 f"2. 执行「{f.name}」操作\n"
-                f"3. 观察系统响应与校验提示"
+                f"3. 观察校验结果并核对条款「{f.name}」"
             ),
             "expected": invalid_expected,
             "priority": "P2",
@@ -246,9 +247,9 @@ def _pick_scenario_boundary(profile: DocumentProfile) -> Optional[Boundary]:
 def _scenario_cases(profile: DocumentProfile) -> list[dict]:
     """规则 3：主流程操作序列 → 场景法用例（基本流 / 备选流 / 异常流）。
 
-    预期结果必须引用主流程的具体步骤与文档中的具体边界要素（UP-3），
-    如「依次完成「输入账号与密码」…」、「触发「连续错误 5 次」（5次）限制…」，
-    不得使用纯模板套话。
+    步骤与预期结果引用主流程原文步骤与文档中的具体边界要素（条款引用），
+    每个断言片段均带条款 / 流程原文引用，不写 PRD 之外的规则与后果
+    （迭代 7 幻觉溯源：清除历史模板中编造的回滚 / 落库类后果表述）。
     """
     module = profile.module
     flows = profile.flows or [f"完成「{module}」的核心操作"]
@@ -260,7 +261,8 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
     boundary_ref = ""
     if boundary is not None:
         boundary_ref = (
-            f"；触发「{boundary.text}」（{_fmt_num(boundary.value)}{boundary.unit}）限制时按需求规则处理"
+            f"；条款「{boundary.text}」：触发「{boundary.text}」"
+            f"（{_fmt_num(boundary.value)}{boundary.unit}）时按条款「{boundary.text}」处理"
         )
     return [
         {
@@ -268,7 +270,8 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
             "precondition": "初始状态正常，测试账号 / 数据已准备就绪",
             "steps": flow_steps,
             "expected": (
-                f"依次完成{flow_quotes}后业务目标达成：各步骤顺序执行成功，最终状态正确"
+                f"条款「{flows[0]}」：依次完成{flow_quotes}后业务目标达成"
+                f"（主流程：{flow_line}）"
             ),
             "priority": "P0",
             "category": "功能",
@@ -280,12 +283,12 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
             "precondition": "初始状态正常，测试账号 / 数据已准备就绪",
             "steps": (
                 f"1. 按主流程执行：{flow_line}\n"
-                "2. 在中间步骤跳过可选项或临时中断操作\n"
-                "3. 恢复操作并继续执行剩余步骤"
+                f"2. 在「{alt_anchor}」环节跳过可选项或临时中断操作\n"
+                f"3. 恢复「{alt_anchor}」并继续执行剩余步骤"
             ),
             "expected": (
-                f"系统允许合法的可选分支：在「{alt_anchor}」环节跳过可选项、临时中断后恢复，"
-                f"剩余步骤可继续完成，数据状态保持一致"
+                f"条款「{alt_anchor}」：在「{alt_anchor}」环节跳过可选项后可继续完成剩余步骤；"
+                f"条款「{alt_anchor}」：在「{alt_anchor}」环节临时中断后恢复并继续完成剩余步骤"
             ),
             "priority": "P1",
             "category": "功能",
@@ -297,12 +300,12 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
             "precondition": "初始状态正常，测试账号 / 数据已准备就绪",
             "steps": (
                 f"1. 按主流程执行：{flow_line}\n"
-                "2. 在关键步骤注入异常（网络中断 / 服务不可用 / 数据冲突）\n"
-                "3. 观察系统的错误提示与数据回滚情况"
+                f"2. 在「{flows[0]}」环节注入异常并观察系统响应\n"
+                f"3. 观察「{flows[0]}」的错误处理结果"
             ),
             "expected": (
-                f"在「{flows[0]}」环节注入异常时系统给出明确错误提示，事务回滚、数据保持一致"
-                f"{boundary_ref}，不产生脏数据"
+                f"条款「{flows[0]}」：在「{flows[0]}」环节注入异常时系统拒绝该次操作"
+                f"{boundary_ref}"
             ),
             "priority": "P2",
             "category": "异常",
@@ -313,7 +316,11 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
 
 
 def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
-    """规则 5：多条件组合 → 判定表用例（条件全成立 / 部分不成立）。"""
+    """规则 5：多条件组合 → 判定表用例（条件全成立 / 部分不成立）。
+
+    条件桩与预期结果只引用文档要素原文（功能点 / 边界 / 主流程），
+    每个断言片段均带条款引用，不写 PRD 之外的规则与后果（迭代 7 幻觉溯源）。
+    """
     module = profile.module
     conditions: list[str] = []
     if profile.features:
@@ -327,17 +334,17 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
         conditions.append("多条件组合场景的全部条件")
 
     category = "接口" if any(f.kind == "api" for f in profile.features) else "功能"
-    cond_lines = "\n".join(f"{i}. {c}" for i, c in enumerate(conditions, 1))
+    cond_join = "；".join(conditions)
     return [
         {
             "title": "【判定表】多条件组合 - 全部条件成立",
             "precondition": "测试环境与数据满足全部条件的准备要求",
             "steps": (
-                f"1. 按判定表逐项确认条件：\n{cond_lines}\n"
-                "2. 条件全部成立时执行目标操作\n"
-                "3. 核对系统动作与判定表期望动作一致"
+                f"1. 按判定表逐项确认条件：{cond_join}\n"
+                f"2. 条件全部成立时执行目标操作：{cond_join}\n"
+                f"3. 核对系统动作与判定表定义一致：{cond_join}"
             ),
-            "expected": "系统按判定表规则执行对应动作，结果与规则定义一致",
+            "expected": f"全部条件成立时系统执行目标操作并与判定表定义一致：{cond_join}",
             "priority": "P1",
             "category": category,
             "method": "判定表",
@@ -347,11 +354,13 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
             "title": "【判定表】多条件组合 - 部分条件不成立",
             "precondition": "测试环境与数据满足部分条件的准备要求",
             "steps": (
-                "1. 构造仅部分条件成立的输入组合（至少一个条件不成立）\n"
-                "2. 执行目标操作\n"
-                "3. 核对系统动作与判定表期望动作一致"
+                f"1. 构造仅部分条件成立的输入组合：{cond_join}\n"
+                f"2. 执行目标操作：{cond_join}\n"
+                f"3. 核对系统动作与判定表定义一致：{cond_join}"
             ),
-            "expected": "部分条件不成立时系统拒绝该操作，走判定表定义的备选动作并给出明确中文提示",
+            "expected": (
+                f"仅部分条件成立时系统拒绝该操作并走判定表定义的备选动作：{cond_join}"
+            ),
             "priority": "P2",
             "category": "异常",
             "method": "判定表",
@@ -413,23 +422,27 @@ def _resource_boundaries(group: _ResourceGroup, boundaries: list[Boundary]) -> l
 
 
 def _boundary_direction_text(b: Boundary) -> str:
-    """单个边界的数值化预期文本：边界值 + 两侧相邻值 + 方向（接受 / 拒绝 / 触发）。"""
+    """单个边界的数值化预期文本：边界值 + 两侧相邻值 + 方向（接受 / 拒绝 / 触发）。
+
+    只引用边界原文（调用方以「{b.text}」条款引用包裹）与边界 ±1 推导值，
+    不写 PRD 之外的规则与后果（迭代 7 幻觉溯源）。
+    """
     value = _fmt_num(b.value)
     lo = _fmt_num(b.value - 1)
     hi = _fmt_num(b.value + 1)
     if b.kind == "range_min":
         return (
             f"输入 {value}{b.unit}（恰好达到最小值）被接受，"
-            f"{lo}{b.unit}（少 1）被拒绝并提示，{hi}{b.unit}（多 1）正常通过"
+            f"{lo}{b.unit}（少 1）被拒绝，{hi}{b.unit}（多 1）被接受"
         )
     if b.kind == "range_max":
         return (
             f"输入 {value}{b.unit}（恰好达到最大值）被接受，"
-            f"{hi}{b.unit}（多 1）被拒绝并提示，{lo}{b.unit}（少 1）正常通过"
+            f"{hi}{b.unit}（多 1）被拒绝，{lo}{b.unit}（少 1）被接受"
         )
     return (
         f"输入 {value}{b.unit}（恰好达到阈值）触发规则处理，"
-        f"{lo}{b.unit}（少 1）未达阈值不触发，{hi}{b.unit}（多 1）触发阈值限制并提示"
+        f"{lo}{b.unit}（少 1）未达阈值不触发，{hi}{b.unit}（多 1）触发阈值并被拒绝"
     )
 
 
@@ -466,10 +479,14 @@ def _endpoint_cases(profile: DocumentProfile) -> list[dict]:
             {
                 "title": f"【场景法】{group.key} 资源接口主流程专项：{group.features[0].name}",
                 "precondition": f"接口服务可用，{group.key} 资源测试数据已准备就绪",
-                "steps": f"1. 准备{group.key} 资源的合法测试数据\n{call_lines}\n3. 校验资源状态与响应数据",
+                "steps": (
+                    f"1. 按「{group.features[0].name}」准备{group.key} 资源的合法测试数据\n"
+                    f"{call_lines}\n"
+                    f"3. 核对「{group.features[0].name}」的资源状态与响应数据"
+                ),
                 "expected": (
-                    f"依次调用{names}完成{group.key} 资源接口主流程：各接口响应状态与接口定义一致，"
-                    f"资源数据正确写入并通过查询校验"
+                    f"依次调用{names}完成{group.key} 资源接口主流程："
+                    f"各接口响应状态与「{group.features[0].name}」的接口定义一致"
                 ),
                 "priority": "P1",
                 "category": "接口",
@@ -496,9 +513,9 @@ def _endpoint_cases(profile: DocumentProfile) -> list[dict]:
                 ),
                 "precondition": f"接口服务可用，{target.key} 资源接口可正常调用",
                 "steps": (
-                    f"1. 准备{target.key} 资源接口的参数边界测试数据\n"
-                    "2. 分别提交边界值与两侧相邻值参数\n"
-                    "3. 校验接口响应与参数校验提示"
+                    f"1. 按「{merged[0].text}」准备{target.key} 资源接口的参数边界测试数据\n"
+                    f"2. 按「{merged[0].text}」分别提交边界值与两侧相邻值参数\n"
+                    f"3. 核对「{merged[0].text}」的接口响应与参数校验结果"
                 ),
                 "expected": parts,
                 "priority": "P1",
@@ -528,9 +545,11 @@ def _concrete_anchor(profile: DocumentProfile) -> str:
 def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
     """确定性补齐：保证 ≥8 条用例，且 method / category 覆盖达标。
 
-    补齐落到「边界值」时，预期结果同样必须引用具体数值与两侧相邻值
-    （UP-3：边界值用例禁止通用套话），锚点取 1 件（0/1/2 三个确定值）；
-    其余补齐用例引用文档要点锚点，保证等价类 / 场景法预期结果含具体词。
+    补齐落到「边界值」时，预期结果必须引用具体数值与两侧相邻值
+    （UP-3：边界值用例禁止通用套话）：优先引用文档真实边界条款原文与
+    边界 ±1 推导值（迭代 7 幻觉溯源：不编造文档外的数量规则），
+    文档完全没有边界时才退回「1 件」锚点（0/1/2 三个确定值）；
+    其余补齐用例的断言片段引用文档要点锚点，不写 PRD 之外的规则。
     """
     module = profile.module
     anchor = _concrete_anchor(profile)
@@ -549,14 +568,23 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
         method = missing_method[0] if missing_method else _PAD_METHODS[i % len(_PAD_METHODS)]
         category = missing_category[0] if missing_category else CATEGORIES[i % len(CATEGORIES)]
         if method == "边界值":
-            expected = (
-                "输入 1 件（恰好达到最小数量 1 件）时被接受；"
-                "两侧相邻值方向：输入 0 件（少 1）被拒绝并提示，输入 2 件（多 1）正常通过"
-            )
+            if profile.boundaries:
+                b = profile.boundaries[0]
+                v, u = _fmt_num(b.value), b.unit
+                lo, hi = _fmt_num(b.value - 1), _fmt_num(b.value + 1)
+                expected = (
+                    f"条款「{b.text}」：输入 {v}{u}（恰好达到边界值）时被接受；"
+                    f"条款「{b.text}」：输入 {lo}{u}（少 1）被拒绝，输入 {hi}{u}（多 1）被接受"
+                )
+            else:
+                expected = (
+                    "输入 1 件（恰好达到最小数量 1 件）时被接受；"
+                    "两侧相邻值方向：输入 0 件（少 1）被拒绝，输入 2 件（多 1）被接受"
+                )
         elif anchor:
             expected = (
-                f"围绕{anchor}按{method}方法论验证{category}类输入，"
-                "系统表现与需求规则定义一致，无异常与数据不一致"
+                f"{anchor}：按{method}方法论验证{category}类输入并处理成功；"
+                f"{anchor}：结果与{anchor}的条款定义一致"
             )
         else:
             expected = "系统行为符合需求规则定义，无异常与数据不一致"
@@ -565,9 +593,9 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
                 "title": f"【{method}】补充用例 - {category}类覆盖（{i + 1}）",
                 "precondition": "系统处于功能可用状态",
                 "steps": (
-                    f"1. 按{method}方法论准备{category}类测试数据\n"
-                    "2. 执行目标操作\n"
-                    "3. 观察并记录系统表现"
+                    f"1. 按{method}方法论准备{category}类测试数据{anchor}\n"
+                    f"2. 执行目标操作{anchor}\n"
+                    f"3. 观察并记录{anchor}的系统表现"
                 ),
                 "expected": expected,
                 "priority": "P2" if category in ("异常", "边界") else "P1",
