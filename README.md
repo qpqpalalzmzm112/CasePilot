@@ -75,7 +75,7 @@ casepilot gen -i examples/prd_boundary.md -o output/my_cases.xlsx
 ### 版本与帮助
 
 ```bash
-casepilot --version     # casepilot 0.1.0
+casepilot --version     # casepilot 1.0.0
 casepilot gen --help    # 全中文帮助
 ```
 
@@ -401,6 +401,13 @@ mock 模式则从源头杜绝幻觉：全部用例内容锚定输入文档的具
 对照人工整理 golden 基准集，3 样例实测 100.0）；LLM-as-a-Judge 逐条评审（好例 4.9 / 5 vs 坏例 2.0 / 5，分差 2.9）；
 工程侧 332 项 pytest + 96.13% 覆盖率 + CI 门禁。改进流程用评测驱动：本轮就是靠 eval 差距明细（17/19 → 补齐 `/user` 端点）实现 19/19。
 
+## 求职与发布文档（v1.0）
+
+- **[docs/resume_snippets.md](docs/resume_snippets.md)**：简历项目条目（一行式 ×2 + STAR 描述）与量化数字速查表
+- **[docs/interview_qa.md](docs/interview_qa.md)**：面试问答话术（锚点式答题模板，3 组 12 题 + 出声训练使用说明）
+- **[docs/release_notes_v1.0.md](docs/release_notes_v1.0.md)**：v1.0.0 Release Notes 草稿
+- **[CHANGELOG.md](CHANGELOG.md)**：版本更新日志（Keep a Changelog 风格，5 轮迭代完整变更）
+
 ## 开发与测试
 
 ```bash
@@ -440,6 +447,9 @@ evals/
 docs/
   zentao_import.md       # 禅道导入操作指南 + 人工验证清单
   best_practices.md      # 最佳实践（输入文档写法 / 方法论选择 / 禅道工作流 / 双模式配置 / 评测集维护）
+  resume_snippets.md     # 简历项目条目（一行式 + STAR）与量化数字速查表
+  interview_qa.md        # 面试问答话术（锚点式答题模板，3 组 12 题）
+  release_notes_v1.0.md  # v1.0.0 Release Notes 草稿
 examples/                # 3 个离线固定样例
 tests/                   # pytest 测试套件
 ```
@@ -449,7 +459,8 @@ tests/                   # pytest 测试套件
 - **迭代 2（已完成）**：pytest 脚本骨架导出、Markdown 导出、禅道导入前校验与导入指南、LLM 输出失败自动重试、质量门禁雏形（覆盖维度检查 / 边界值预期结果数值化）
 - **迭代 3（已完成）**：LLM-as-a-Judge 用例质量自评（双模式）、evals 评测集与 4 维评分框架、等价类 / 场景法预期结果引用输入具体值
 - **迭代 4（已完成）**：GitHub Actions CI（pytest + 覆盖率门禁 + Python 3.10 / 3.12 矩阵）与覆盖率徽章、评测驱动改进 mock 引擎（补齐 `/user` 端点覆盖，petstore eval 97.4 → 100.0）、效果对比表 / 演示实录 / 面试讲解要点、最佳实践文档（[docs/best_practices.md](docs/best_practices.md)）
-- **迭代 5**：MCP 形态接入
+- **迭代 5（已完成）**：v1.0 收尾——求职包装文档（[docs/resume_snippets.md](docs/resume_snippets.md) / [docs/interview_qa.md](docs/interview_qa.md)）、[CHANGELOG.md](CHANGELOG.md) 与 [docs/release_notes_v1.0.md](docs/release_notes_v1.0.md)、版本号定格 1.0.0
+- **后续**：MCP 形态接入
 
 ## 已知限制
 

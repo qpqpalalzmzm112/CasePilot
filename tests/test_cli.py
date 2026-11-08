@@ -26,7 +26,7 @@ class TestVersion:
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
         assert f"casepilot {__version__}" in _combined(result)
-        assert __version__ == "0.1.0"
+        assert __version__ == "1.0.0"
 
 
 class TestHelp:
