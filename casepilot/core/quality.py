@@ -281,7 +281,122 @@ def drop_fuzzy_cases(raw_cases: Sequence[Mapping[str, Any]]) -> tuple[list[dict]
 
 
 # ---------------------------------------------------------------------------
-# 幻觉溯源检查辅助（迭代 7 / UP-2）：步骤与预期的关键断言必须有 PRD 依据
+# 测量值预言禁令（迭代 8 / UP-2）：预期结果禁止预言实测值形态
+# ---------------------------------------------------------------------------
+
+# 实测值形态的测量名词：预期结果出现这些词 + 无判定标准限定的数值，
+# 即视为「预言实测结果」（如「平均响应时间为 1.8 秒」「错误率为 0.05%」「吞吐达到 1200」）
+_MEASUREMENT_NOUN_RE = re.compile(
+    r"平均响应时间|平均耗时|平均延迟|平均处理时间|响应时间|处理时间|耗时|延迟|"
+    r"错误率|失败率|成功率|吞吐量|吞吐|TPS|QPS|qps"
+)
+# 判定标准限定词：性能预期只允许判定标准形态（≤2s、≥100 QPS、不超过 X 等）
+_CRITERION_RE = re.compile(
+    r"≤|≥|<|>|＜|＞|不超过|不高于|不低于|不小于|不少于|至少|最多|最少|以内|之内|以下|以上|小于|大于|低于|高于"
+)
+# 测量名词到其后数值的最大间隔（容忍「平均响应时间为 1.8 秒」类修饰）
+_MEAS_WINDOW = 16
+
+
+@dataclass
+class MeasurementViolation:
+    """测量值预言禁令违规明细：用例标题 + 实测值预言片段。"""
+
+    title: str
+    phrases: list[str]
+
+
+def find_measurement_predictions(text: str, source_pairs: Optional[set] = None) -> list[str]:
+    """返回文本中「预言实测值形态」的片段（测量名词 + 无判定标准限定的数值）。
+
+    判定规则（可解释、可单测）：
+    - 测量名词（响应时间 / 错误率 / 吞吐 等）到数值之间出现判定标准限定词
+      （≤ / ≥ / 不超过 / 至少 / 以内 等）→ 判定标准形态，放行；
+    - 数值在 PRD 原文有据（source_pairs 按（数值, 单位）对校验，±1 推导豁免）→ 放行；
+    - 其余（如「平均响应时间为 1.8 秒」「错误率为 0.05%」「吞吐达到 1200」）→ 实测值预言。
+    """
+    found: list[str] = []
+    for noun in _MEASUREMENT_NOUN_RE.finditer(text):
+        window = text[noun.end(): noun.end() + _MEAS_WINDOW]
+        value_match = re.search(r"\d+(?:\.\d+)?", window)
+        if value_match is None:
+            continue
+        between = window[: value_match.start()]
+        if _CRITERION_RE.search(between):
+            continue  # 判定标准形态（≤2s / ≥100 QPS / 不超过 X）
+        tail = window[value_match.end():]
+        unit_match = re.match(
+            r"\s*(?:%|％|毫秒|ms|秒|分钟|小时|天|QPS|qps|次/秒|次每秒)?", tail
+        )
+        phrase = text[noun.start(): noun.end() + len(window[: value_match.end()]) + unit_match.end()]
+        if source_pairs is not None:
+            unit = unit_match.group(0).strip() if unit_match.group(0) else ""
+            if _numeric_grounded(float(value_match.group(0)), unit, source_pairs):
+                continue  # 数值 PRD 原文有据
+        found.append(phrase)
+    return found
+
+
+def check_measurement_gate(
+    cases: Iterable[Union[TestCase, Mapping[str, Any]]], source_text: str = ""
+) -> list[MeasurementViolation]:
+    """测量值预言禁令（阻断接口）：expected 预言实测值形态即视为校验失败。
+
+    与模糊词门禁同口径同风格；供 LLM 生成链路在结构校验后执行——
+    命中即触发回灌重试（见 core/llm.py），重试耗尽丢弃并中文告警。
+    source_text 为 PRD 原文（可空）：数值 PRD 原文有据时放行。
+    """
+    source_pairs = extract_numeric_tokens(source_text) if source_text else None
+    violations: list[MeasurementViolation] = []
+    for case in cases:
+        phrases = find_measurement_predictions(_field(case, "expected"), source_pairs)
+        if phrases:
+            violations.append(
+                MeasurementViolation(title=_field(case, "title") or "（无标题）", phrases=phrases)
+            )
+    return violations
+
+
+def build_measurement_feedback(violations: Sequence[MeasurementViolation]) -> str:
+    """构造回灌提示词的中文反馈（含用例标题与实测值预言片段）。"""
+    parts = [
+        f"用例「{v.title}」预期结果预言实测值「{'」、「'.join(v.phrases)}」"
+        for v in violations
+    ]
+    return (
+        "；".join(parts)
+        + "。性能预期只允许判定标准形态（≤2s、≥100 QPS、不超过 X 等），且数值须 PRD 原文有据，"
+        "请改写为判定标准形态"
+    )
+
+
+def drop_measurement_cases(
+    raw_cases: Sequence[Mapping[str, Any]], source_text: str = ""
+) -> tuple[list[dict], list[str]]:
+    """重试耗尽后的兜底阻断：丢弃仍预言实测值的用例，返回（保留用例, 中文告警明细）。
+
+    告警逐条列出用例标题与实测值预言片段，便于用户定位修正。
+    """
+    source_pairs = extract_numeric_tokens(source_text) if source_text else None
+    kept: list[dict] = []
+    warnings: list[str] = []
+    for case in raw_cases:
+        data = dict(case)
+        phrases = find_measurement_predictions(_field(data, "expected"), source_pairs)
+        if phrases:
+            title = _field(data, "title") or "（无标题）"
+            warnings.append(
+                f"测量值预言禁令丢弃用例「{title}」：预期结果预言实测值「{'」、「'.join(phrases)}」，"
+                "性能预期只允许判定标准形态（≤2s、≥100 QPS、不超过 X 等），已从用例集中移除"
+            )
+        else:
+            kept.append(data)
+    return kept, warnings
+
+
+# ---------------------------------------------------------------------------
+# 幻觉溯源检查辅助（迭代 7 / UP-2，迭代 8 依据 / 假设二分）：
+# 步骤与预期的关键断言必须有 PRD 依据
 # ---------------------------------------------------------------------------
 
 # 数字单位（与 adapters/prd.py 的边界量词保持一致）
@@ -292,6 +407,13 @@ _NUM_UNIT_RE = re.compile(rf"(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})")
 _RANGE_RE = re.compile(rf"(\d+(?:\.\d+)?)\s*[-~—～至]\s*(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})")
 # 无单位数字（如 OpenAPI "minLength: 8"）：记为（值, ""），作宽松依据（单位不限）
 _BARE_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+# 时间复合形态（迭代 8）：「29 分 59 秒」归一为总秒数「1799 秒」参与依据判定，
+# 与「30 分钟（1800 秒）」类换算表述互通（「分钟」不在此列，防止误吞）
+_TIME_COMPOUND_RE = re.compile(r"(\d+)\s*分(?!\s*钟)\s*(\d+)\s*秒")
+# 时间单位 → 秒数换算（跨单位等价判定用）
+_TIME_UNIT_SECONDS: dict[str, float] = {
+    "秒": 1.0, "秒钟": 1.0, "分": 60.0, "分钟": 60.0, "小时": 3600.0, "天": 86400.0,
+}
 # 行首步骤编号 / 需求编号标签（"1. " / "2、" / "FR-1.1：" / "NFR-1.2 "）不算断言
 _STEP_NUM_RE = re.compile(
     r"^\s*(?:(?:N?FR|需求|R)[-\s]?)?\d+(?:\.\d+)*[.、：:．)]\s*", re.IGNORECASE
@@ -305,6 +427,32 @@ _LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 # 推测项两类判定口径
 KIND_NUMERIC = "数字/阈值断言无依据"
 KIND_ACTION = "动作/后果断言无依据"
+# 迭代 8 / UP-2 依据假设二分：契约类发明 → 设计假设；测量值预言 → 禁令拦截（不降级为假设）
+KIND_CONTRACT = "契约类设计假设无依据"
+KIND_MEASUREMENT = "测量值预言（实测值形态）"
+
+# 契约类发明模式（迭代 8 / UP-2）：PRD 无依据的契约细节判定为「设计假设」——
+# 错误码 code=、message 精确文案、localStorage / 存储细节、日志格式 login_result=XXX
+_CONTRACT_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
+    ("错误码 code=…", re.compile(r"code\s*[=＝:：]\s*\d+", re.IGNORECASE)),
+    ("message 字段文案", re.compile(r"message\s*(?:[=＝:：]|(?:固定)?为)", re.IGNORECASE)),
+    ("本地存储细节", re.compile(r"localStorage|sessionStorage|indexedDB", re.IGNORECASE)),
+    ("日志 / 标记格式", re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*=\s*[A-Z][A-Z0-9_]{1,}")),
+)
+
+
+def find_contract_inventions(text: str, source_text: str) -> list[str]:
+    """返回文本中「PRD 无依据」的契约类细节片段（有据的契约引用不报）。
+
+    判定：命中契约模式（错误码 / message 文案 / 存储细节 / 日志格式）且该片段
+    未逐字出现在 PRD 原文 → 判定为设计假设（而非有据内容）。
+    """
+    found: list[str] = []
+    for label, pattern in _CONTRACT_PATTERNS:
+        for m in pattern.finditer(text):
+            if m.group(0) not in source_text:
+                found.append(f"{m.group(0)}（{label}）")
+    return found
 
 # 标准测试推导词（豁免溯源）：边界值推导方向词与通用执行动词——
 # 属测试设计的合法推导 / 执行动作，不构成需求规则断言；
@@ -331,11 +479,15 @@ _GLUE_CHARS = frozenset(
 def extract_numeric_tokens(text: str) -> set[tuple[float, str]]:
     """抽取文本中的（数值, 单位）断言对（行首步骤编号不算断言）。
 
-    区间（8-20 位）两端都算断言值；无单位数字记为（值, ""），只作宽松依据。
+    区间（8-20 位）两端都算断言值；无单位数字记为（值, ""），只作宽松依据；
+    时间复合形态「29 分 59 秒」先归一为总秒数（1799 秒）再抽取（迭代 8）。
     """
     tokens: set[tuple[float, str]] = set()
     for raw_line in text.splitlines():
         line = _STEP_NUM_RE.sub("", raw_line)
+        line = _TIME_COMPOUND_RE.sub(
+            lambda m: f"{int(m.group(1)) * 60 + int(m.group(2))} 秒", line
+        )
         occupied: list[tuple[int, int]] = []
         for m in _RANGE_RE.finditer(line):
             tokens.add((float(m.group(1)), m.group(3)))
@@ -354,7 +506,10 @@ def extract_numeric_tokens(text: str) -> set[tuple[float, str]]:
 
 
 def _numeric_grounded(value: float, unit: str, source_pairs: set[tuple[float, str]]) -> bool:
-    """数字 / 阈值断言的依据判定：同值同单位 / 同值无单位 / 边界 ±1 推导值均算有依据。"""
+    """数字 / 阈值断言的依据判定：同值同单位 / 同值无单位 / 边界 ±1 推导值均算有依据；
+    时间单位跨单位等价（迭代 8）：按总秒数换算比对（±1 秒视为相邻推导），
+    「30 分钟」与「1800 秒」「29 分 59 秒」互通。
+    """
     candidates = (
         (value, unit),
         (value, ""),
@@ -363,7 +518,23 @@ def _numeric_grounded(value: float, unit: str, source_pairs: set[tuple[float, st
         (value - 1, ""),
         (value + 1, ""),
     )
-    return any(c in source_pairs for c in candidates)
+    if any(c in source_pairs for c in candidates):
+        return True
+    if unit in _TIME_UNIT_SECONDS:
+        total = value * _TIME_UNIT_SECONDS[unit]
+        for sv, su in source_pairs:
+            if su in _TIME_UNIT_SECONDS:
+                other = sv * _TIME_UNIT_SECONDS[su]
+                diff = abs(other - total)
+                # 跨单位等价：总秒数精确相等，或整秒相邻推导（±1 秒）；
+                # 小数实测值（如 1.8 秒）不得借整数口径（2 秒）放行
+                if diff == 0.0 or (
+                    diff == 1.0
+                    and float(total).is_integer()
+                    and float(other).is_integer()
+                ):
+                    return True
+    return False
 
 
 def _content_tokens(text: str, strip_derivations: bool = True) -> set[str]:
@@ -428,9 +599,27 @@ class GroundingItem:
     index: int  # 用例序号（1 起）
     title: str
     fragment: str  # 无依据片段
-    kind: str  # KIND_NUMERIC / KIND_ACTION
+    kind: str  # KIND_NUMERIC / KIND_ACTION / KIND_CONTRACT / KIND_MEASUREMENT
     detail: str  # 判定说明
     suggestion: str  # 改进建议（引用用例标题与片段）
+
+
+@dataclass
+class CaseSource:
+    """逐条用例的来源标注（迭代 8 / UP-2 依据假设二分）。
+
+    label 形如 [PRD §FR-1.3]（有据）/ [假设]（含设计假设片段）/ [测量值预言]。
+    """
+
+    index: int
+    title: str
+    label: str
+
+
+# 依据 / 假设二分的来源标签
+LABEL_PRD = "[PRD §{ref}]"
+LABEL_ASSUMPTION = "[假设]"
+LABEL_MEASUREMENT = "[测量值预言]"
 
 
 @dataclass
@@ -441,6 +630,7 @@ class GroundingReport:
     total: int
     items: list[GroundingItem] = field(default_factory=list)
     removed: list[GroundingItem] = field(default_factory=list)
+    sources: list[CaseSource] = field(default_factory=list)  # 逐条用例来源标注
 
     @property
     def ok(self) -> bool:
@@ -453,29 +643,57 @@ class GroundingReport:
         return {i.index for i in self.items}
 
     def format_report(self) -> str:
-        """渲染「推测项」专节（全中文 Markdown，点名用例标题 + 无依据片段）。"""
+        """渲染「推测项」专节（全中文 Markdown，依据 / 假设二分标注）。
+
+        结构（迭代 8 / UP-2）：
+        - 逐条用例来源标注：[PRD §原文编号] / [假设] / [测量值预言]；
+        - 设计假设（[假设]）集中清单：用例标题 + 假设片段 + 「与开发确认接口契约或删除」；
+        - 测量值预言专节：按禁令拦截（拒绝重试 / 丢弃），不降级为 [假设]。
+        """
         lines = [
-            "## 幻觉溯源校验：推测项",
+            "## 幻觉溯源校验：推测项（依据 / 假设二分）",
             "",
             f"- 溯源依据：{self.source or 'PRD 原文'}",
             "- 判定口径：数字 / 阈值断言须在 PRD 条款出现（边界 ±1 推导值豁免）；"
-            "动作 / 后果断言按实词命中判定（≥2 个实词命中算有依据）",
+            "动作 / 后果断言按实词命中判定（≥2 个实词命中算有依据）；"
+            "PRD 无依据的契约细节（错误码 / message 文案 / 存储与日志格式）判定为「设计假设」；"
+            "测量值预言按禁令拦截（性能预期只允许判定标准形态，不降级为假设）",
             f"- 受检用例：{self.total} 条；推测项：{len(self.items)} 处"
             f"（涉及用例 {len(self.speculative_indexes)} 条）",
         ]
         if self.removed:
             lines.append(f"- 严格模式：已删除推测项用例 {len(self.removed)} 条并告警")
         lines.append("")
+        if self.sources:
+            lines.append("### 用例来源标注（逐条：[PRD §原文编号] / [假设] / [测量值预言]）")
+            lines.append("")
+            for n, s in enumerate(self.sources, 1):
+                lines.append(f"{n}. 用例「{s.title}」：{s.label}")
+            lines.append("")
         if not self.items and not self.removed:
             lines.append("全部用例的步骤与预期均可在 PRD 找到依据，无推测项。")
             return "\n".join(lines)
-        if self.items:
-            lines.append("### 无依据断言明细")
+        assumption_items = [i for i in self.items if i.kind != KIND_MEASUREMENT]
+        measurement_items = [i for i in self.items if i.kind == KIND_MEASUREMENT]
+        if assumption_items:
+            lines.append("### 设计假设（[假设]）集中清单")
             lines.append("")
-            for n, item in enumerate(self.items, 1):
-                lines.append(f"{n}. 【{item.kind}】{item.suggestion}")
+            for n, item in enumerate(assumption_items, 1):
+                lines.append(
+                    f"{n}. 用例「{item.title}」假设片段「{item.fragment}」（{item.kind}）："
+                    f"{item.detail}；建议：与开发确认接口契约或删除"
+                )
+            lines.append("")
+        if measurement_items:
+            lines.append("### 测量值预言（禁令拦截，不降级为 [假设]）")
+            lines.append("")
+            for n, item in enumerate(measurement_items, 1):
+                lines.append(
+                    f"{n}. 用例「{item.title}」片段「{item.fragment}」（{item.kind}）：{item.detail}；"
+                    "建议：性能预期只允许判定标准形态（≤2s、≥100 QPS、不超过 X），请改写或删除"
+                )
+            lines.append("")
         if self.removed:
-            lines.append("")
             lines.append("### 严格模式已删除用例")
             lines.append("")
             for n, item in enumerate(self.removed, 1):
@@ -496,27 +714,75 @@ def check_grounding(
       优先，全文兜底）；边界 ±1 类测试推导值豁免溯源（属合法推导）。
     - 动作 / 后果断言：按关键词覆盖判定——片段实词（中文二字组合 + 拉丁词，
       剔除标准测试推导词）≥2 个命中 PRD 原文算有依据。
-    - 无依据内容标记为「推测项」，报告专列一节点名用例标题 + 无依据片段 + 建议；
+    - 契约类发明（迭代 8）：错误码 code= / message 文案 / 存储与日志格式等契约
+      细节须逐字见于 PRD，否则判定为「设计假设」（[假设]），不再按实词命中放行。
+    - 测量值预言（迭代 8）：预期预言实测值形态（「平均响应时间为 X 秒」类）按
+      测量值预言禁令拦截（KIND_MEASUREMENT），不降级为 [假设]。
+    - 无依据内容标记为「推测项」，报告专列一节点名用例标题 + 无依据片段 + 建议，
+      并逐条标注用例来源（[PRD §原文编号] / [假设] / [测量值预言]）；
       --strict 由调用方（evals/judge.py）按 speculative_indexes 删除用例。
     """
     items: list[GroundingItem] = []
     source_tokens = _source_tokens(source_text)
     source_pairs = extract_numeric_tokens(source_text)
     rows = list(cases)
+    sources: list[CaseSource] = []
     for idx, case in enumerate(rows, 1):
         title = _field(case, "title") or "（无标题）"
         clause = ""
+        fr_ref = ""
         for fr in frs:
             if fr.tag in title:
                 clause = fr.text
+                fr_ref = fr.id
                 break
         text = f"{_field(case, 'steps')}\n{_field(case, 'expected')}"
         seen: set[str] = set()
+        case_kinds: list[str] = []
         for fragment in _split_fragments(text):
             frag = fragment.strip()
             if not frag or frag in seen:
                 continue
             seen.add(frag)
+            # 0) 测量值预言（迭代 8 禁令）：实测值形态按禁令拦截，不降级为 [假设]
+            predictions = find_measurement_predictions(frag, source_pairs)
+            if predictions:
+                joined = "、".join(predictions)
+                items.append(
+                    GroundingItem(
+                        index=idx,
+                        title=title,
+                        fragment=frag,
+                        kind=KIND_MEASUREMENT,
+                        detail=f"片段预言实测值「{joined}」（数值须 PRD 原文有据，性能预期只允许判定标准形态）",
+                        suggestion=(
+                            f"用例「{title}」片段「{frag}」预言实测值「{joined}」，"
+                            f"违反测量值预言禁令（{_clause_hint(clause)}）；"
+                            "请改写为判定标准形态（≤2s、≥100 QPS、不超过 X）或删除"
+                        ),
+                    )
+                )
+                case_kinds.append(KIND_MEASUREMENT)
+                continue
+            # 0.5) 契约类发明（迭代 8）：PRD 无依据的契约细节判定为「设计假设」
+            contracts = find_contract_inventions(frag, source_text)
+            if contracts:
+                joined = "、".join(contracts)
+                items.append(
+                    GroundingItem(
+                        index=idx,
+                        title=title,
+                        fragment=frag,
+                        kind=KIND_CONTRACT,
+                        detail=f"契约细节「{joined}」未见于 PRD 原文，判定为设计假设",
+                        suggestion=(
+                            f"用例「{title}」片段「{frag}」含 PRD 无依据的契约细节「{joined}」"
+                            f"（{_clause_hint(clause)}），判定为设计假设；请与开发确认接口契约或删除"
+                        ),
+                    )
+                )
+                case_kinds.append(KIND_CONTRACT)
+                continue
             # 1) 数字 / 阈值断言：数值 + 单位对须有 PRD 依据（±1 推导豁免）
             bad_nums = [
                 (value, unit)
@@ -539,6 +805,7 @@ def check_grounding(
                         ),
                     )
                 )
+                case_kinds.append(KIND_NUMERIC)
                 continue
             # 2) 动作 / 后果断言：实词命中 ≥2 个算有依据
             tokens = _content_tokens(frag)
@@ -560,7 +827,17 @@ def check_grounding(
                     ),
                 )
             )
-    return GroundingReport(source=source_name, total=len(rows), items=items)
+            case_kinds.append(KIND_ACTION)
+        # 逐条用例来源标注（迭代 8 / UP-2 依据假设二分）：
+        # 含测量值预言 → [测量值预言]；含设计假设类片段 → [假设]；否则 [PRD §原文编号]
+        if KIND_MEASUREMENT in case_kinds:
+            label = LABEL_MEASUREMENT
+        elif case_kinds:
+            label = LABEL_ASSUMPTION
+        else:
+            label = LABEL_PRD.format(ref=fr_ref or "原文")
+        sources.append(CaseSource(index=idx, title=title, label=label))
+    return GroundingReport(source=source_name, total=len(rows), items=items, sources=sources)
 
 
 @dataclass

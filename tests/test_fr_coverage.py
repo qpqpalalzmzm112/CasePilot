@@ -95,6 +95,51 @@ class TestFRExtraction:
         assert profile.frs == []
 
 
+class TestExtractionRobustness:
+    """迭代 8 / UP-1 抽取鲁棒化：单级 / 多级 / 加粗 / 括号 / 表格 / 全角连字符。"""
+
+    def test_single_level_number(self):
+        """FR-3 单级编号（历史漏抽根因）必须抽取。"""
+        profile = prd.parse_text("# 需求\n\nFR-3：支持忘记密码找回\n", source="x.md")
+        assert [(f.id, f.text) for f in profile.frs] == [("FR-3", "支持忘记密码找回")]
+
+    def test_multi_level_number(self):
+        profile = prd.parse_text(
+            "# 需求\n\nFR-1.3.2：支持多级编号\nFR-4.3：设备挤下线\n", source="x.md"
+        )
+        assert [f.id for f in profile.frs] == ["FR-1.3.2", "FR-4.3"]
+
+    def test_bold_context(self):
+        profile = prd.parse_text("# 需求\n\n**FR-3**：支持忘记密码找回\n", source="x.md")
+        assert [f.id for f in profile.frs] == ["FR-3"]
+
+    def test_paren_context(self):
+        profile = prd.parse_text("# 需求\n\n（FR-3）支持忘记密码找回\n", source="x.md")
+        assert [(f.id, f.text) for f in profile.frs] == [("FR-3", "支持忘记密码找回")]
+
+    def test_full_width_dash_kept_verbatim(self):
+        """全角连字符「FR—3」容忍且逐字保留。"""
+        profile = prd.parse_text("# 需求\n\nFR—3：全角连字符编号\n", source="x.md")
+        assert [f.id for f in profile.frs] == ["FR—3"]
+
+    def test_table_cell_numbering(self):
+        """表格单元格内编号（| FR-3 | 支持忘记密码 |）。"""
+        text = "# 需求\n\n| 编号 | 描述 |\n| --- | --- |\n| FR-3 | 支持忘记密码 |\n"
+        profile = prd.parse_text(text, source="x.md")
+        assert [(f.id, f.text) for f in profile.frs] == [("FR-3", "支持忘记密码")]
+
+    def test_hierarchical_number_with_decorations(self):
+        profile = prd.parse_text("# 需求\n\n**1.4**：支持导入数据\n", source="x.md")
+        assert [f.id for f in profile.frs] == ["1.4"]
+
+    def test_numbering_style_count_tolerates_full_width_dash(self):
+        assert prd._count_numbering_styles("详见 FR—3 与 NFR—1.2 的说明") == 2
+
+    def test_prose_requirement_word_not_counted(self):
+        """正文「用户需求 3 天完成」不计入编号样式（防误伤）。"""
+        assert prd._count_numbering_styles("用户需求 3 天内完成响应") == 0
+
+
 class TestReconciliation:
     """生成后 FR 逐条对账：覆盖核对、追溯前缀、缺漏自动补齐。"""
 
@@ -154,7 +199,8 @@ class TestReconciliation:
         cases = validate_cases(mock_engine.generate(profile))
         _, report = reconcile_fr_coverage(profile, cases)
         text = format_fr_coverage_report(report)
-        assert "| 编号 | 原文摘要 | 覆盖用例数 | 状态 |" in text
+        # 迭代 8：核对表升级为「PRD 条款 → 用例编号」映射
+        assert "| 编号 | 原文摘要 | 覆盖用例编号 | 状态 |" in text
         assert "| FR-auto-1 | 支持功能点1 |" in text
         assert "FR 覆盖率 100%（8/8）" in text
         assert "✓" in text and "已补齐" in text

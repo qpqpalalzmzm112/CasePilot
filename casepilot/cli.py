@@ -30,7 +30,7 @@ from evals.run import run_eval
 from . import __version__
 from .core.generator import detect_source_type, generate_from_file
 from .core.llm import MODE_DESCRIPTIONS
-from .core.quality import validate_zentao_excel
+from .core.quality import KIND_MEASUREMENT, validate_zentao_excel
 from .exporters.markdown_export import export_markdown
 from .exporters.pytest_skeleton import export_pytest_skeleton
 from .exporters.zentao_excel import export_zentao_excel
@@ -156,6 +156,10 @@ def _run_generate(input_path: Path, emit: str, output: Optional[Path], openapi_o
         saved = export_markdown(result.cases, out_path, source=str(input_path))
         typer.echo(f"导出完成：{saved}（共 {len(result.cases)} 条用例）")
 
+    # FR 对账核对表摘要（迭代 8 / UP-1）：CLI 结束打印覆盖率总结句
+    if result.fr_coverage_summary:
+        typer.echo(f"FR 对账摘要：{result.fr_coverage_summary}")
+
 
 @app.command("gen", cls=_ChineseHelpCommand)
 def gen(
@@ -266,8 +270,12 @@ def judge(
         if source is not None:
             rows, grounding = run_grounding_check(rows, source, strict=strict)
             for item in grounding.removed:
+                # 测量值预言按禁令拦截（迭代 8 / UP-2），不与 [假设] 推测项混同
+                label = (
+                    "测量值预言用例" if item.kind == KIND_MEASUREMENT else "推测项用例"
+                )
                 typer.echo(
-                    f"严格模式告警：已删除推测项用例「{item.title}」（{item.kind}）：片段「{item.fragment}」",
+                    f"严格模式告警：已删除{label}「{item.title}」（{item.kind}）：片段「{item.fragment}」",
                     err=True,
                 )
         report = judge_cases(rows, grounding=grounding)
