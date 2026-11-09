@@ -54,9 +54,12 @@ REGRESSION_BASELINE = {
         "categories": {"功能": 8, "异常": 7, "边界": 10},
     },
     "prd_security_perf.md": {
-        "count": 35,
-        "methods": {"安全测试": 18, "性能测试": 12, "场景法": 3, "判定表": 2},
-        "categories": {"功能": 13, "异常": 12, "边界": 10},
+        # 迭代 9 F3 引文完整化：FR-auto-8「支持 50 并发用户同时登录」由边界用例
+        # 正确覆盖（引用含完整条款原文），去掉 1 条与边界用例重叠的重复补齐
+        # （性能/功能「目标规模判定标准」水分），好用例零损失
+        "count": 30,
+        "methods": {"安全测试": 18, "性能测试": 7, "场景法": 3, "判定表": 2},
+        "categories": {"功能": 12, "异常": 8, "边界": 10},
     },
 }
 
@@ -162,11 +165,11 @@ class TestNFRInCoverageTable:
 
 
 class TestNFRBackfill:
-    """缺漏补齐路径单测（含 NFR 缺漏）：未命中 FR 自动生成基础用例并标注「已补齐」。"""
+    """缺漏补齐路径单测（含 NFR 缺漏，迭代 9 具体化补齐）：条款有要素才补齐，补不出登记未覆盖。"""
 
-    def test_nfr_gap_backfilled_with_specialized_method(self):
+    def test_nfr_gap_concrete_filled_with_specialized_method(self):
         profile = parse_document(NUMBERED_PRD)
-        # 只喂 1 条无关用例：全部 FR/NFR 缺漏，全部走补齐路径
+        # 只喂 1 条无关用例：全部 FR/NFR 缺漏，走具体化补齐 / 未覆盖登记路径
         unrelated = validate_cases(
             [
                 {
@@ -182,22 +185,37 @@ class TestNFRBackfill:
             ]
         )
         merged, report = reconcile_fr_coverage(profile, unrelated)
-        assert report.filled_count == 9
+        # FR-2.1（无任何可验证要素）→ 登记未覆盖，不凑数；其余 8 条具体化补齐
+        assert report.filled_count == 8
+        assert [item.fr_id for item in report.uncovered_items] == ["FR-2.1"]
+        assert "优惠券" in report.uncovered_items[0].suggestion
         for fr in profile.frs:
-            backfilled = [c for c in merged if c.title.startswith(fr.tag) and "自动补齐" in c.title]
-            assert len(backfilled) == 2, f"{fr.tag} 应补齐有效类 + 异常类各 1 条"
+            if fr.id == "FR-2.1":
+                continue
+            backfilled = [c for c in merged if c.title.startswith(fr.tag)]
+            assert backfilled, f"{fr.tag} 含具体要素，应具体化补齐"
+            assert all("（具体化补齐）" in c.title for c in backfilled)
         # NFR-1.1（响应时间）→ 性能测试、NFR-1.3（锁定）→ 安全测试
         by_tag = {fr.id: [c for c in merged if c.title.startswith(fr.tag)] for fr in profile.frs}
         assert all(c.method == "性能测试" for c in by_tag["NFR-1.1"])
         assert all(c.method == "安全测试" for c in by_tag["NFR-1.3"])
+        # 触发类条款（NFR-1.3）产阈值边界 + 相邻反例 2 条，判定标准类（NFR-1.1）产 1 条
+        assert len(by_tag["NFR-1.3"]) == 2
+        assert len(by_tag["NFR-1.1"]) == 1
         text = format_fr_coverage_report(report)
         assert "已补齐" in text
+        assert "⚠ 未覆盖（已列清单）" in text
 
     def test_backfill_cases_keep_verbatim_tags(self):
+        """具体化补齐用例标题保留原文编号追溯前缀；补不出的 FR 零遗漏登记进未覆盖清单。"""
         profile = parse_document(NUMBERED_PRD)
-        merged, _ = reconcile_fr_coverage(profile, [])
+        merged, report = reconcile_fr_coverage(profile, [])
+        uncovered_ids = {item.fr_id for item in report.uncovered_items}
         for fr in profile.frs:
-            assert any(c.title.startswith(fr.tag) for c in merged), fr.tag
+            if fr.id in uncovered_ids:
+                assert not any(c.title.startswith(fr.tag) for c in merged), fr.id
+            else:
+                assert any(c.title.startswith(fr.tag) for c in merged), fr.tag
 
 
 class TestRegressionFourSamples:

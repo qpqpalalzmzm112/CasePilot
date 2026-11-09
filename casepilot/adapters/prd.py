@@ -18,21 +18,26 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ..core.quality import semantic_trim
 from ..core.schema import Boundary, DocumentProfile, Feature, FRItem
 
-# 数字单位（中文需求文档常见量词，含性能指标常见单位）
-_UNIT_PATTERN = r"位|次|分钟|小时|秒|天|件|元|个|岁|字符|张|条|笔|分|%|％|并发|QPS|qps"
+# 数字单位（中文需求文档常见量词，含性能指标常见单位；万台/台=设备容量，迭代 9）
+_UNIT_PATTERN = r"位|次|分钟|小时|秒|天|件|元|个|岁|字符|张|条|笔|分|%|％|并发|QPS|qps|万台|台"
 # 区间：如 8-20 位 / 8~20 位 / 8 至 20 位
 _RANGE_RE = re.compile(
     rf"(\d+(?:\.\d+)?)\s*[-~—～至]\s*(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})"
 )
 # 比较词 + 数字（±单位）：如 满 100 减 20 / 至少 1 件 / 不超过 50 件 / 低于 100 元
+# 迭代 9 / UP-3 多阈值完整性：补「累计」（当日累计 50000）与紧贴数字的「超」（单笔超 10000），
+# 同一条款的多个数值阈值全部抽出；「超时 / 超出」类词不误吞（要求「超」后紧跟数字）
 _KEYWORD_RE = re.compile(
-    r"(满|减|加|打|折|最少|至少|不少于|不低于|最低|最多|不超过|不高于|最高|超过|大于|小于|低于|高于|≥|≤)"
+    r"(满|减|加|打|折|最少|至少|不少于|不低于|最低|最多|不超过|不高于|最高|超过|大于|小于|低于|高于|累计|超(?=\s*\d)|≥|≤)"
     rf"\s*(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})?"
 )
 # 单个数字 + 单位：如 5 次 / 30 分钟 / 100 元
 _NUMBER_RE = re.compile(rf"(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})")
+# 时间点切换边界（迭代 9 / UP-3）：如 07:00 / 22:00 电价切换
+_TIMEPOINT_RE = re.compile(r"(\d{1,2})[:：](\d{2})")
 # 标题行
 _HEADING_RE = re.compile(r"^(#{1,6})\s*(.+?)\s*$")
 # 列表项（- / * / 1. / 1、）
@@ -105,24 +110,58 @@ def _match_explicit_fr(text: str) -> re.Match | None:
     return _EXPLICIT_FR_PREFIX_RE.match(text) or _EXPLICIT_FR_HIER_RE.match(text)
 
 
+# 片段截取的语义边界（句读 / 标点，不含空格与「」引号——空格不作边界，
+# 引文内部不截断，迭代 9 / F3）
+_SNIP_BOUNDARY = "，,。；;、：:！!？?（(【[\t\n"
+
+
 def _snippet(line: str, start: int, end: int, keep: int = 12) -> str:
-    """截取数字匹配处的上下文片段，作为边界描述（确定性截断）。"""
+    """截取数字匹配处的上下文片段，作为边界描述（迭代 9 / F3：语义边界截断）。
+
+    起点向左扩展到最近的语义边界（空格 / 标点），终点向右扩展到语义边界，
+    绝不从数字 / 词语中间断开——「元或当日累计转账达到 50000 元」类拦腰断片
+    不再出现，片段是完整语义短语（如「单笔转账金额超过 10000 元或当日累计
+    转账达到 50000 元时」）。
+    """
     begin = max(0, start - keep)
-    frag = line[begin:end].strip()
+    while begin > 0 and line[begin - 1] not in _SNIP_BOUNDARY:
+        begin -= 1
+    finish = end
+    while finish < len(line) and line[finish] not in _SNIP_BOUNDARY:
+        finish += 1
+    frag = line[begin:finish].strip()
     # 去掉片段开头的残留标点
     return frag.lstrip("，,。.：:；;、（(【[").strip()
 
 
 def _extract_boundaries(line: str) -> list[Boundary]:
-    """从单行文本中提取数字边界（区间 → 比较词 → 单值，避免重复计数）。"""
+    """从单行文本中提取数字边界（时间点 → 区间 → 比较词 → 单值，避免重复计数）。
+
+    迭代 9 / UP-3 多阈值边界完整性：同一条款（同一行）的多个数值阈值
+    （含无单位的「单笔超 10000 或当日累计 50000」）全部抽出，
+    时间点（07:00 / 22:00 切换）单独按 timepoint 抽出。
+    """
     boundaries: list[Boundary] = []
     occupied: list[tuple[int, int]] = []
 
     def _free(pos: int) -> bool:
         return all(pos < s or pos >= e for s, e in occupied)
 
+    # 0) 时间点切换边界：如 07:00 / 22:00（先占位，防止数字被当普通阈值）
+    for m in _TIMEPOINT_RE.finditer(line):
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if hour > 23 or minute > 59:
+            continue
+        text = _snippet(line, m.start(), m.end())
+        boundaries.append(
+            Boundary(text=text, value=float(hour * 60 + minute), kind="timepoint", unit="时点")
+        )
+        occupied.append((m.start(), m.end()))
+
     # 1) 区间边界：如 8-20 位
     for m in _RANGE_RE.finditer(line):
+        if not _free(m.start()):
+            continue
         low, high, unit = m.group(1), m.group(2), m.group(3)
         text = _snippet(line, m.start(), m.end())
         boundaries.append(Boundary(text=text, value=float(low), kind="range_min", unit=unit))
@@ -169,12 +208,24 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
     in_feature_section = False
     in_flow_section = False
     current_section = ""
+    heading_stack: list[tuple[int, str]] = []  # （层级, 标题）小节层级栈
+
+    def _section_path() -> str:
+        """当前小节的「父章节/子章节」真实路径（去掉文档标题层，迭代 9 / UP-1）。"""
+        titles = [t for _, t in heading_stack]
+        if len(titles) >= 2:
+            titles = titles[1:]
+        return "/".join(titles)
 
     for line in lines:
         heading_match = _HEADING_RE.match(line)
         if heading_match:
             has_heading = True
             title = heading_match.group(2)
+            level = len(heading_match.group(1))
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            heading_stack.append((level, _clean_item(title)))
             # 第一个一级 / 二级标题作为文档主模块名
             if module == default_module and len(heading_match.group(1)) <= 2 and title:
                 module = _clean_item(title) or module
@@ -183,9 +234,11 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
             in_flow_section = bool(_FLOW_SECTION_RE.search(title))
             continue
 
-        # 数字边界：每一行都扫描（含标题外的正文、列表、步骤行），并记录所在小节
+        # 数字边界：每一行都扫描（含标题外的正文、列表、步骤行），记录所在小节与条款原文行
         for b in _extract_boundaries(line):
-            boundaries.append(b.model_copy(update={"section": current_section}))
+            boundaries.append(
+                b.model_copy(update={"section": current_section, "clause": line.strip()})
+            )
 
         stripped_line = line.strip()
 
@@ -208,9 +261,19 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
                 fr_text = "，".join(t for t in text_cells if t)
                 if fr_text:
                     if all(fr_id != f.id for f in fr_items):
-                        fr_items.append(FRItem(id=fr_id, text=fr_text, section=current_section))
+                        fr_items.append(
+                            FRItem(
+                                id=fr_id, text=fr_text,
+                                section=current_section, section_path=_section_path(),
+                            )
+                        )
                     if all(fr_text != f.name for f in features):
-                        features.append(Feature(name=fr_text, description="", section=current_section))
+                        features.append(
+                            Feature(
+                                name=fr_text, description="",
+                                section=current_section, section_path=_section_path(),
+                            )
+                        )
             continue
 
         bullet_match = _BULLET_RE.match(line)
@@ -224,9 +287,19 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
             fr_id, fr_text = fr_match.group(1), _clean_item(fr_match.group(2))
             if fr_text:
                 if all(fr_id != f.id for f in fr_items):
-                    fr_items.append(FRItem(id=fr_id, text=fr_text, section=current_section))
+                    fr_items.append(
+                        FRItem(
+                            id=fr_id, text=fr_text,
+                            section=current_section, section_path=_section_path(),
+                        )
+                    )
                 if all(fr_text != f.name for f in features):
-                    features.append(Feature(name=fr_text, description="", section=current_section))
+                    features.append(
+                        Feature(
+                            name=fr_text, description="",
+                            section=current_section, section_path=_section_path(),
+                        )
+                    )
             continue
 
         if bullet_match:
@@ -235,7 +308,12 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
             if in_flow_section:
                 flows.append(item)
             elif in_feature_section or not has_heading:
-                features.append(Feature(name=item, description="", section=current_section))
+                features.append(
+                    Feature(
+                        name=item, description="",
+                        section=current_section, section_path=_section_path(),
+                    )
+                )
             continue
 
         # 流程小节中不带编号的步骤行（如「打开登录页面」）
@@ -248,7 +326,12 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
         if _ACTION_LINE_RE.match(stripped):
             item = _clean_item(stripped)
             if item and all(item != f.name for f in features):
-                features.append(Feature(name=item, description="", section=current_section))
+                features.append(
+                    Feature(
+                        name=item, description="",
+                        section=current_section, section_path=_section_path(),
+                    )
+                )
 
     # 去重（保持出现顺序）
     seen: set[str] = set()
@@ -282,7 +365,7 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
                 "容忍全角连字符 FR—3、全角半角冒号、顿号、括号（FR-3）、加粗 **FR-3** 与表格单元格上下文）"
             )
         fr_items = [
-            FRItem(id=f"FR-auto-{i}", text=f.name, section=f.section, auto=True)
+            FRItem(id=f"FR-auto-{i}", text=f.name, section=f.section, section_path=f.section_path, auto=True)
             for i, f in enumerate(features, 1)
         ]
 
@@ -305,5 +388,6 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
 
 
 def _truncate(text: str, limit: int = 16) -> str:
-    """确定性截断长文本，避免用例标题过长。"""
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+    """确定性截断长文本（迭代 9 / F3：语义边界截断，不带省略号，
+    绝不从数字 / 词语中间断开）。"""
+    return semantic_trim(text, limit)

@@ -113,7 +113,7 @@ def build_skeleton(
         func_name = _unique_name(index, _slugify(case.title), used_names)
 
         block = [
-            f"# 方法: {case.method}",
+            f"# 方法: {case.method}{'（设计假设）' if case.assumption else ''}",
             f"@pytest.mark.{mark}",
             f"def {func_name}():",
         ]
