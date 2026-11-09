@@ -550,6 +550,7 @@ def run_grounding_check(
             for idx, group in removed_by_index.items()
         ]
         report.items = [item for item in report.items if item.index not in drop]
+        report.sources = [s for s in report.sources if s.index not in drop]
         rows = [c for i, c in enumerate(rows, 1) if i not in drop]
     return rows, report
 

@@ -4,6 +4,9 @@
 每个 FR 至少 1 条用例（覆盖用例标题带 [FR-x.y] 追溯前缀），缺漏的 FR 自动生成
 基础用例补齐（有效类 + 异常类各 1 条，method 按 FR 内容选方法论），
 并输出中文对账报告（随生成流程打印，落盘 output/<输入名>_fr_coverage.md）。
+迭代 8 对账硬门禁（UP-1）：覆盖率强制 100%——补齐后仍缺任一 FR/NFR 即抛中文
+异常使生成失败（exit 1）；覆盖率核对表升级为「PRD 条款 → 用例编号」映射
+（编号 | 原文摘要 | 覆盖用例编号列表 | ✓/已补齐）。
 """
 
 from __future__ import annotations
@@ -75,6 +78,7 @@ class FRCoverageItem:
     summary: str
     count: int  # 覆盖用例数（补齐后含自动补齐用例）
     filled: bool  # True=规则生成未命中，已自动补齐
+    case_numbers: list[int] = field(default_factory=list)  # 覆盖用例编号（对账后用例序号，1 起）
 
 
 @dataclass
@@ -177,8 +181,11 @@ def reconcile_fr_coverage(
 ) -> tuple[list[TestCase], Optional[FRCoverageReport]]:
     """生成后 FR 逐条对账：覆盖核对 + 追溯前缀 + 缺漏自动补齐，返回（用例集, 对账报告）。
 
-    - 每个 FR 至少 1 条用例：已覆盖的 FR 给首条覆盖用例补 [FR-x.y] 追溯前缀；
+    - 每个 FR 至少 1 条用例：已覆盖的 FR 给首条覆盖用例补 [FR-x.y] 追溯前缀，
+      并登记覆盖用例编号（对账后用例序号，1 起）；
     - 未命中的 FR 自动生成基础用例补齐（标记「已补齐」）；
+    - 覆盖率强制 100%（迭代 8 / UP-1 硬门禁）：补齐后仍缺任一 FR/NFR →
+      抛中文异常使生成失败（exit 1），不再仅警告；
     - 文档无 FR 清单（如 OpenAPI 输入）时原样返回，api 命令行为不变。
     """
     if not profile.frs:
@@ -195,15 +202,39 @@ def reconcile_fr_coverage(
                     update={"title": f"{fr.tag} {work[first].title}"}
                 )
             items.append(
-                FRCoverageItem(fr_id=fr.id, summary=_fr_summary(fr.text), count=len(covering), filled=False)
+                FRCoverageItem(
+                    fr_id=fr.id,
+                    summary=_fr_summary(fr.text),
+                    count=len(covering),
+                    filled=False,
+                    case_numbers=[i + 1 for i in covering],
+                )
             )
         else:
             backfill = _fr_backfill_cases(fr, profile.module)
+            start = len(work)
             work.extend(backfill)
             added += len(backfill)
             items.append(
-                FRCoverageItem(fr_id=fr.id, summary=_fr_summary(fr.text), count=len(backfill), filled=True)
+                FRCoverageItem(
+                    fr_id=fr.id,
+                    summary=_fr_summary(fr.text),
+                    count=len(backfill),
+                    filled=True,
+                    case_numbers=[start + 1 + j for j in range(len(backfill))],
+                )
             )
+
+    # 硬门禁（迭代 8 / UP-1）：补齐后逐条复查覆盖率必须 100%，否则生成失败
+    missing = [
+        fr.id for fr in profile.frs if not any(_case_covers_fr(c, fr) for c in work)
+    ]
+    if missing:
+        raise ValueError(
+            f"FR 覆盖率不足 100%：自动补齐后仍有 {len(missing)} 条需求无覆盖用例"
+            f"（{'、'.join(missing)}，共 {len(profile.frs)} 条需求），生成失败"
+        )
+
     return work, FRCoverageReport(
         source=profile.source,
         items=items,
@@ -216,7 +247,8 @@ def reconcile_fr_coverage(
 def format_fr_coverage_report(report: FRCoverageReport) -> str:
     """把 FR 对账结果渲染为全中文 Markdown 覆盖率核对表（确定性，不含时间戳）。
 
-    核对表列：编号（逐字引用 PRD 原文编号）| 原文摘要 | 覆盖用例数 | ✓/已补齐；
+    核对表升级为「PRD 条款 → 用例编号」映射（迭代 8 / UP-1）：
+    列 = 编号（逐字引用 PRD 原文编号）| 原文摘要 | 覆盖用例编号列表 | ✓/已补齐；
     编号来源说明区分「原文编号」与「自动编号兜底」两种情况（迭代 7 / UP-1）。
     """
     lines = [
@@ -231,15 +263,17 @@ def format_fr_coverage_report(report: FRCoverageReport) -> str:
             else "- 编号说明：编号逐字引用 PRD 原文编号（FR / NFR 分层），"
             "用例标题追溯前缀与原文编号逐字一致"
         ),
+        "- 覆盖用例编号：对账后用例序号（1 起），与导出用例集顺序一致",
         "",
-        "## 覆盖率核对表",
+        "## 覆盖率核对表（PRD 条款 → 用例编号）",
         "",
-        "| 编号 | 原文摘要 | 覆盖用例数 | 状态 |",
+        "| 编号 | 原文摘要 | 覆盖用例编号 | 状态 |",
         "| --- | --- | --- | --- |",
     ]
     for item in report.items:
         status = "已补齐" if item.filled else "✓"
-        lines.append(f"| {item.fr_id} | {item.summary} | {item.count} | {status} |")
+        numbers = "、".join(f"#{n}" for n in item.case_numbers) or "—"
+        lines.append(f"| {item.fr_id} | {item.summary} | {numbers} | {status} |")
     lines.append("")
     lines.append(report.summary_line())
     return "\n".join(lines)
@@ -276,6 +310,7 @@ def generate_from_file(
 
     # FR 需求对账（迭代 6 / UP-1）：逐条覆盖核对 + 缺漏自动补齐 + 报告打印落盘
     cases, fr_report = reconcile_fr_coverage(profile, cases)
+    fr_summary = ""
     if fr_report is not None:
         text = format_fr_coverage_report(fr_report)
         for line in text.splitlines():
@@ -285,10 +320,12 @@ def generate_from_file(
         report_path = out_dir / f"{p.stem}_fr_coverage.md"
         report_path.write_text(text, encoding="utf-8")
         logger.info("FR 对账报告已落盘：%s", report_path)
+        fr_summary = fr_report.summary_line()
 
     return GenerationResult(
         source=str(p),
         cases=cases,
         mode=gateway.mode,
         generated_at=datetime.now(),
+        fr_coverage_summary=fr_summary,
     )

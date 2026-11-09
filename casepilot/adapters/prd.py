@@ -4,12 +4,13 @@
 - 功能点：功能清单 / 特性类小节下的列表项，或「支持 / 允许 / 提供 …」动宾短语句
 - 数字边界：带单位的数字（8-20 位、5 次、30 分钟）与比较词（至少 / 不超过 / 超过 / 满 等）
 - 主流程：「主流程 / 基本流 / 核心流程」小节下的编号步骤；缺失时按功能点合成
-- FR/NFR 需求清单（迭代 7 对账返工）：抽取「带原始编号的需求清单」——
-  识别 FR/NFR 分层编号（FR-1.1 / FR-2.3 / NFR-1.2 / 需求1 / R2 / 1.4 等形式，
-  含中英文冒号 / 顿号后缀），编号逐字保留原文（大小写、分隔符不改写），
-  每条记录原文条款文本；仅当文档没有任何原文编号时才允许自动编号兜底
-  （FR-auto-1…，对账报告注明「自动编号」）。条目所在小节同步记录，
-  供安全 / 性能类需求的语境判定使用
+- FR/NFR 需求清单（迭代 7 对账返工，迭代 8 抽取鲁棒化 + 硬门禁）：抽取「带原始编号
+  的需求清单」——识别 FR/NFR 分层编号（FR-3 / FR-4.3 / FR-1.3.2 / NFR-1.2 / 需求1 /
+  需求 2 / R2 / 1.4 等形式，含中英文冒号 / 顿号 / 括号 / 加粗 / 表格单元格上下文与
+  全角连字符 FR—3），编号逐字保留原文（大小写、分隔符不改写），每条记录原文条款文本；
+  文档能侦测到编号样式但抽取 0 条时抛中文异常（禁止静默兜底）；仅当文档完全无编号
+  样式时才允许自动编号兜底（FR-auto-1…，对账报告注明「自动编号」）。条目所在小节
+  同步记录，供安全 / 性能类需求的语境判定使用
 """
 
 from __future__ import annotations
@@ -43,19 +44,63 @@ _FLOW_SECTION_RE = re.compile(r"主流程|基本流|核心流程|操作流程|�
 # 动宾短语兜底识别
 _ACTION_LINE_RE = re.compile(r"^\s*(支持|允许|提供|可以|能够|用户可以)")
 
-# 显式需求编号（迭代 7 对账返工）：FR-1.1 / NFR-1.2 / 需求3 / R2 等前缀形式，
-# 编号逐字保留原文（大小写、分隔符不改写），后缀允许中英文冒号 / 顿号 / 空格
+# 显式需求编号（迭代 7 对账返工 + 迭代 8 抽取鲁棒化）：
+# 编号形式覆盖 FR-3（单级）/ FR-4.3 / FR-1.3.2（多级）/ NFR-1.2 / 需求1 / 需求 2 / R2 / 1.4，
+# 容忍全角 / 半角连字符（FR—3）、全角半角冒号、顿号、括号包裹（（FR-3））、
+# Markdown 加粗（**FR-3**）与表格单元格上下文；编号逐字保留原文（大小写、分隔符不改写），
+# 每条记录原文条款文本。
+# 编号核心（逐字保留，不改写大小写与分隔符）
+_ID_CORE = r"(?:NFR|FR|需求|R)[—–\-－\s]?\d+(?:\.\d+)*"
+# 多级层级编号核心：1.2 / 3.1.4（"1. 步骤"类一级编号不算）
+_HIER_CORE = r"\d+\.\d+(?:\.\d+)*"
+# 编号前装饰（加粗 / 反引号 / 括号 / 引用 / 表格分隔 / 列表符）
+_DECOR_PRE = r"[（(【\[>*_`«»\"'、,，\-—–]*"
+# 编号后装饰（加粗 / 反引号，闭括号交由分隔符消费）
+_DECOR_POST = r"[>*_`«»\"']*"
+# 编号与条款文本的分隔：全角半角冒号 / 顿号 / 句点 / 闭括号 / 空白
+_FR_SEP = r"(?:[：:、.．）)】\]]|\s)+"
 _EXPLICIT_FR_PREFIX_RE = re.compile(
-    r"^((?:NFR|FR|需求|R)[-\s]?\d+(?:\.\d+)*)(?:[：:、.．)]|\s)+(.+)$", re.IGNORECASE
+    rf"^\s*{_DECOR_PRE}({_ID_CORE}){_DECOR_POST}{_FR_SEP}(.+)$", re.IGNORECASE
 )
 # 显式需求编号：1.2 / 3.1.4 等至少两级的层级编号形式（"1. 步骤"类一级编号不算）
-_EXPLICIT_FR_HIER_RE = re.compile(r"^(\d+\.\d+(?:\.\d+)*)(?:[：:、.．)]|\s)+(.+)$")
+_EXPLICIT_FR_HIER_RE = re.compile(rf"^\s*{_DECOR_PRE}({_HIER_CORE}){_DECOR_POST}{_FR_SEP}(.+)$")
+
+# 表格单元格整格编号（如 | FR-3 | 支持忘记密码 | 的 FR-3 格）
+_TABLE_CELL_ID_RE = re.compile(
+    rf"^\s*{_DECOR_PRE}({_ID_CORE}){_DECOR_POST}\s*$", re.IGNORECASE
+)
+# 表格分隔 / 占位格（| --- | 、| — |），不作条款文本
+_TABLE_PLACEHOLDER_RE = re.compile(r"^[—\-–—\s:：]+$")
+
+# ---------------------------------------------------------------------------
+# 编号样式侦测（迭代 8 / UP-1 硬门禁）：识别「文档使用原文编号」的痕迹。
+# FR / NFR 编号（容忍全角连字符）出现在任意位置均算 1 处；
+# 需求N / R# / 多级数字编号按行首（容忍加粗 / 括号 / 表格格等装饰）侦测，
+# 避免把正文里的「用户需求 3 天」误判为编号样式。
+# ---------------------------------------------------------------------------
+_FR_TOKEN_ANYWHERE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:NFR|FR)[—–\-－]?\d+(?:\.\d+)*", re.IGNORECASE
+)
+_LINE_PREFIX_TOKEN_RE = re.compile(
+    rf"^\s*{_DECOR_PRE}(?:(?:需求|R)[—–\-－\s]?\d+(?:\.\d+)*|{_HIER_CORE})", re.IGNORECASE
+)
+
+
+def _count_numbering_styles(text: str) -> int:
+    """统计文档中原文编号样式出现的处数（硬门禁报错用，全角连字符同样计入）。"""
+    count = len(_FR_TOKEN_ANYWHERE_RE.findall(text))
+    for raw in text.splitlines():
+        for cell in raw.split("|") + raw.split("｜"):
+            if _LINE_PREFIX_TOKEN_RE.match(cell):
+                count += 1
+    return count
 
 
 def _match_explicit_fr(text: str) -> re.Match | None:
     """识别显式需求编号条目，返回（原文编号, 需求文本）的匹配；无编号返回 None。
 
-    编号（group 1）逐字保留原文，不做任何大小写 / 分隔符改写（迭代 7）。
+    编号（group 1）逐字保留原文，不做任何大小写 / 分隔符改写（迭代 7）；
+    容忍加粗 / 括号 / 引用等装饰与全角连字符（迭代 8 鲁棒化）。
     """
     return _EXPLICIT_FR_PREFIX_RE.match(text) or _EXPLICIT_FR_HIER_RE.match(text)
 
@@ -142,6 +187,32 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
         for b in _extract_boundaries(line):
             boundaries.append(b.model_copy(update={"section": current_section}))
 
+        stripped_line = line.strip()
+
+        # 表格行（迭代 8 鲁棒化）：| FR-3 | 支持忘记密码 | 单元格内编号逐字抽取
+        if stripped_line.startswith(("|", "｜")):
+            cells = [c.strip() for c in re.split(r"[|｜]", stripped_line) if c.strip()]
+            id_idx = None
+            fr_id = ""
+            for idx, cell in enumerate(cells):
+                cell_match = _TABLE_CELL_ID_RE.match(cell)
+                if cell_match:
+                    id_idx, fr_id = idx, cell_match.group(1)
+                    break
+            if id_idx is not None:
+                text_cells = [
+                    _clean_item(c)
+                    for j, c in enumerate(cells)
+                    if j != id_idx and not _TABLE_PLACEHOLDER_RE.match(c)
+                ]
+                fr_text = "，".join(t for t in text_cells if t)
+                if fr_text:
+                    if all(fr_id != f.id for f in fr_items):
+                        fr_items.append(FRItem(id=fr_id, text=fr_text, section=current_section))
+                    if all(fr_text != f.name for f in features):
+                        features.append(Feature(name=fr_text, description="", section=current_section))
+            continue
+
         bullet_match = _BULLET_RE.match(line)
         item = _clean_item(bullet_match.group(1)) if bullet_match else None
         candidate = item if item is not None else _clean_item(line.strip())
@@ -198,9 +269,18 @@ def parse_text(text: str, source: str = "文本输入") -> DocumentProfile:
             deduped_b.append(b)
     boundaries = deduped_b
 
-    # 需求清单兜底（迭代 7 对账返工）：无任何原文编号时才允许自动编号，
+    # 需求清单兜底（迭代 7 对账返工 + 迭代 8 硬门禁）：
+    # 文档能侦测到原文编号样式但抽取 0 条 → 抛中文异常（禁止静默回退自动编号），
+    # 由 CLI 以 exit 1 退出；仅当文档完全无编号样式时才允许自动编号兜底，
     # 编号为 FR-auto-1…（auto=True），对账报告中注明「自动编号」
     if not fr_items:
+        detected = _count_numbering_styles(text)
+        if detected:
+            raise ValueError(
+                f"检测到原文编号样式 {detected} 处但抽取 0 条需求条目，已禁止静默回退自动编号："
+                "请检查需求编号书写形式（支持 FR-3 / FR-4.3 / FR-1.3.2 / NFR-1.2 / 需求1 / 需求 2 / R2 / 1.4，"
+                "容忍全角连字符 FR—3、全角半角冒号、顿号、括号（FR-3）、加粗 **FR-3** 与表格单元格上下文）"
+            )
         fr_items = [
             FRItem(id=f"FR-auto-{i}", text=f.name, section=f.section, auto=True)
             for i, f in enumerate(features, 1)

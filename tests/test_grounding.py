@@ -381,3 +381,172 @@ class TestLLMChainInterception:
         text = report.format_report("cases.xlsx")
         assert "幻觉溯源校验：推测项" in text
         assert "严格模式" in text
+
+
+# ---------------------------------------------------------------------------
+# 迭代 8 / UP-2：依据 / 假设二分（契约类发明 → [假设]，测量值预言 → 禁令拦截）
+# ---------------------------------------------------------------------------
+
+# 契约类发明坏例（DoD 3 必须标 [假设]）：错误码 / message 文案 / 存储细节 / 日志格式
+CONTRACT_EXPECTED = (
+    "登录失败返回 code=1001，message=\"账号或密码错误\"；"
+    "token 存入 localStorage，日志记录 login_result=SUCCESS"
+)
+# 虚构规则 + 契约混合坏例（DoD 3）：限流降级 / code=503 / 告警通知
+FABRICATED_EXPECTED = "连续错误 5 次后锁定领取 30 分钟；触发限流降级，code=503，发送告警通知"
+
+
+class TestContractInventionsAsAssumptions:
+    """契约类发明治理：PRD 无依据的契约细节判定为「设计假设」（[假设]）。"""
+
+    def setup_method(self):
+        self.source = NUMBERED_PRD.read_text(encoding="utf-8")
+        self.frs = parse_document(NUMBERED_PRD).frs
+
+    def test_contract_details_marked_as_assumption(self):
+        """code=1001 / localStorage / login_result=SUCCESS → 契约类设计假设。"""
+        case = _case(title="[NFR-1.3] 验证契约细节", expected=CONTRACT_EXPECTED)
+        report = quality.check_grounding([case], self.source, self.frs)
+        assert not report.ok
+        kinds = {i.kind for i in report.items}
+        assert quality.KIND_CONTRACT in kinds
+        joined = "".join(i.suggestion for i in report.items)
+        assert "code=1001" in joined
+        assert "localStorage" in joined
+        assert "login_result=SUCCESS" in joined
+        assert "与开发确认接口契约或删除" in joined
+
+    def test_fabricated_rule_and_contract_labeled_assumption(self):
+        """「限流降级 / code=503 / 告警通知」→ 溯源标 [假设]。"""
+        case = _case(title="[NFR-1.3] 验证虚构规则", expected=FABRICATED_EXPECTED)
+        report = quality.check_grounding([case], self.source, self.frs)
+        assert not report.ok
+        text = report.format_report()
+        assert "[假设]" in text
+        assert "与开发确认接口契约或删除" in text
+        assert "限流降级" in text
+
+    def test_contract_cited_in_prd_is_grounded(self):
+        """契约细节逐字见于 PRD 时不算发明（不得误伤有据内容）。"""
+        source = self.source + "\n接口错误码 code=503 时提示「服务繁忙」\n"
+        case = _case(title="[NFR-1.3] 验证错误码", expected="接口错误码 code=503 时提示「服务繁忙」")
+        report = quality.check_grounding([case], source, self.frs)
+        contract_items = [i for i in report.items if i.kind == quality.KIND_CONTRACT]
+        assert contract_items == []
+
+    def test_strict_deletes_assumption_case(self):
+        """--strict 下 [假设] 用例删除并告警。"""
+        rows = [_case(title="[NFR-1.3] 验证契约细节", expected=CONTRACT_EXPECTED)]
+        kept, report = run_grounding_check(rows, NUMBERED_PRD, strict=True)
+        assert kept == []
+        assert report.removed
+        text = report.format_report()
+        assert "严格模式" in text and "已删除" in text
+
+    def test_normal_mode_keeps_but_marks(self):
+        """普通模式保留 [假设] 用例但显式标注（保住可执行性优势）。"""
+        rows = [_case(title="[NFR-1.3] 验证契约细节", expected=CONTRACT_EXPECTED)]
+        kept, report = run_grounding_check(rows, NUMBERED_PRD, strict=False)
+        assert len(kept) == 1
+        text = report.format_report()
+        assert "[假设]" in text
+
+
+class TestCaseSourceAnnotation:
+    """judge 报告逐条用例标注来源：[PRD §原文编号] 或 [假设]（测量值预言除外）。"""
+
+    def setup_method(self):
+        self.source = NUMBERED_PRD.read_text(encoding="utf-8")
+        self.frs = parse_document(NUMBERED_PRD).frs
+
+    def test_grounded_case_labeled_prd_clause(self):
+        report = quality.check_grounding([_case()], self.source, self.frs)
+        labels = {s.index: s.label for s in report.sources}
+        assert labels[1] == "[PRD §NFR-1.3]", labels
+        assert "用例来源标注" in report.format_report()
+
+    def test_assumption_case_labeled_assumption(self):
+        case = _case(title="[NFR-1.3] 验证虚构规则", expected="触发限流降级")
+        report = quality.check_grounding([_case(), case], self.source, self.frs)
+        labels = {s.index: s.label for s in report.sources}
+        assert labels[1] == "[PRD §NFR-1.3]"
+        assert labels[2] == "[假设]"
+
+    def test_measurement_case_not_downgraded_to_assumption(self):
+        """测量值预言按禁令拦截，标注 [测量值预言]，不降级为 [假设]。"""
+        case = _case(title="[NFR-1.3] 验证性能", expected="平均响应时间为 1.8 秒")
+        report = quality.check_grounding([case], self.source, self.frs)
+        labels = {s.index: s.label for s in report.sources}
+        assert labels[1] == "[测量值预言]"
+        kinds = {i.kind for i in report.items}
+        assert quality.KIND_MEASUREMENT in kinds
+        text = report.format_report()
+        assert "测量值预言" in text
+        assert "判定标准形态" in text
+
+    def test_strict_deletes_measurement_case_with_distinct_warning(self):
+        rows = [
+            _case(),
+            _case(title="[NFR-1.3] 验证性能", expected="平均响应时间为 1.8 秒"),
+        ]
+        kept, report = run_grounding_check(rows, NUMBERED_PRD, strict=True)
+        assert [c["title"] for c in kept] == ["[NFR-1.3] 验证连续错误限制"]
+        assert report.removed
+        assert all(i.kind == quality.KIND_MEASUREMENT for i in report.removed)
+
+    def test_judge_report_contains_annotations(self):
+        rows = [_case(), _case(title="[NFR-1.3] 验证虚构规则", expected="触发限流降级")]
+        _, report = run_grounding_check(rows, NUMBERED_PRD)
+        judged = judge_cases(rows, mode="rule", grounding=report)
+        text = judged.format_report("cases.xlsx")
+        assert "[PRD §NFR-1.3]" in text
+        assert "[假设]" in text
+
+
+class TestNoFalsePositives:
+    """不得误伤有据内容（DoD）：时间戳 / ±1 推导 / 有据数值继续判定为有据。"""
+
+    SOURCE = (
+        "FR-1：订单支付后 T0+604800 秒过期，T0+604801 秒起不可用；"
+        "FR-2：连续 10 秒无响应则中止操作；FR-3：特征命中 0 次时不触发锁定"
+    )
+
+    def _one_case(self, expected, steps="1. 等待至 T0+604800 秒过期时间\n2. 观察订单状态"):
+        return {
+            "title": "[FR-1] 验证过期规则",
+            "precondition": "订单已支付",
+            "steps": steps,
+            "expected": expected,
+            "priority": "P2",
+            "category": "异常",
+            "method": "等价类",
+            "module": "订单/异常验证",
+        }
+
+    def test_timestamp_and_derived_values_grounded(self):
+        """T0+604800 / T0+604801、第 10 秒中止、命中 0 次 → 有据。"""
+        report = quality.check_grounding(
+            [
+                self._one_case("订单在 T0+604800 秒过期，T0+604801 秒起不可用"),
+                self._one_case("连续 10 秒无响应则中止操作"),
+                self._one_case("特征命中 0 次时不触发锁定"),
+            ],
+            self.SOURCE,
+        )
+        assert report.ok, [(i.kind, i.fragment) for i in report.items]
+
+    def test_time_unit_equivalence_not_flagged(self):
+        """时间单位换算等价（30 分钟 ≡ 1800 秒）与 ±1 推导值继续豁免。"""
+        source = "FR-9：密码错误 5 次锁定账号 30 分钟（1800 秒）"
+        case = self._one_case(
+            "密码错误 5 次锁定账号，1800 秒后自动解锁；输入 1799 秒（少 1）仍锁定，输入 1801 秒（多 1）已解锁",
+            steps="1. 密码错误 5 次锁定账号后等待\n2. 观察账号状态",
+        )
+        report = quality.check_grounding([case], source)
+        numeric = [i for i in report.items if i.kind == quality.KIND_NUMERIC]
+        assert numeric == [], [(i.fragment, i.detail) for i in numeric]
+
+    def test_time_compound_normalized(self):
+        """「29 分 59 秒」归一为总秒数参与依据判定（=1799 秒，30 分钟边界 -1 推导）。"""
+        tokens = quality.extract_numeric_tokens("29 分 59 秒")
+        assert (1799.0, "秒") in tokens

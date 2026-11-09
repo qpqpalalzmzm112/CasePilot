@@ -91,6 +91,29 @@ def _fmt_num(value: float) -> str:
     return f"{value:g}"
 
 
+def _seconds_dual(total: float) -> str:
+    """秒数的分钟友好形态（确定性）：1799 秒 → 「29 分 59 秒」、1800 秒 → 「30 分钟」。"""
+    t = int(round(total))
+    if t % 60 == 0:
+        return f"{t // 60} 分钟"
+    return f"{t // 60} 分 {t % 60} 秒"
+
+
+def _boundary_display(b: Boundary, delta: int = 0) -> str:
+    """边界数值 / 两侧相邻值的展示文本（迭代 8 / UP-3 回归锁）。
+
+    秒类阈值（120 ≤ 边界值 < 3600 秒）附分钟友好形态：
+    「1800秒/30 分钟」（阈值本身）、「1799秒/29 分 59 秒」/「1801秒/30 分 1 秒」（两侧相邻值），
+    解锁边界两侧相邻值一目了然；其余单位展示与历史输出逐字一致（零漂移），
+    且只产出判定标准形态，不预言任何实测值。
+    """
+    v = b.value + delta
+    base = f"{_fmt_num(v)}{b.unit}"
+    if b.unit == "秒" and 120 <= b.value < 3600:
+        return f"{base}/{_seconds_dual(v)}"
+    return base
+
+
 def _boundary_cases(b: Boundary, module: str) -> list[dict]:
     """规则 1：数字边界 → 边界值用例（边界值本身 P1、边界 ±1 P2）。
 
@@ -101,42 +124,41 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
     """
     # 专项方法论标注：安全 / 性能类需求 → 安全测试 / 性能测试，其余保持边界值
     method = classify_requirement(b.text, b.section) or "边界值"
-    value = _fmt_num(b.value)
-    unit = b.unit
-    lo = _fmt_num(b.value - 1)
-    hi = _fmt_num(b.value + 1)
+    value = _boundary_display(b, 0)
+    lo = _boundary_display(b, -1)
+    hi = _boundary_display(b, 1)
     cite = f"条款「{b.text}」"
     if b.kind == "range_min":
-        inside_desc, outside_desc = f"最小值 {value}{unit}", f"低于最小值 {lo}{unit}"
+        inside_desc, outside_desc = f"最小值 {value}", f"低于最小值 {lo}"
         inside_expected = (
-            f"{cite}：输入 {value}{unit}（恰好达到最小值）时被接受，输入 {hi}{unit}（多 1）被接受；"
-            f"{cite}：输入 {lo}{unit}（少 1）被拒绝"
+            f"{cite}：输入 {value}（恰好达到最小值）时被接受，输入 {hi}（多 1）被接受；"
+            f"{cite}：输入 {lo}（少 1）被拒绝"
         )
         outside_expected = (
-            f"{cite}：输入 {lo}{unit}（低于最小值 {value}{unit}）时被拒绝；"
-            f"{cite}：输入 {value}{unit}（最小值）被接受，输入 {hi}{unit}（多 1）被接受"
+            f"{cite}：输入 {lo}（低于最小值 {value}）时被拒绝；"
+            f"{cite}：输入 {value}（最小值）被接受，输入 {hi}（多 1）被接受"
         )
     elif b.kind == "range_max":
-        inside_desc, outside_desc = f"最大值 {value}{unit}", f"超过最大值 {hi}{unit}"
+        inside_desc, outside_desc = f"最大值 {value}", f"超过最大值 {hi}"
         inside_expected = (
-            f"{cite}：输入 {value}{unit}（恰好达到最大值）时被接受，输入 {lo}{unit}（少 1）被接受；"
-            f"{cite}：输入 {hi}{unit}（多 1）被拒绝"
+            f"{cite}：输入 {value}（恰好达到最大值）时被接受，输入 {lo}（少 1）被接受；"
+            f"{cite}：输入 {hi}（多 1）被拒绝"
         )
         outside_expected = (
-            f"{cite}：输入 {hi}{unit}（超过最大值 {value}{unit}）时被拒绝；"
-            f"{cite}：输入 {value}{unit}（最大值）被接受，输入 {lo}{unit}（少 1）被接受"
+            f"{cite}：输入 {hi}（超过最大值 {value}）时被拒绝；"
+            f"{cite}：输入 {value}（最大值）被接受，输入 {lo}（少 1）被接受"
         )
     else:
-        inside_desc = f"恰好达到阈值 {value}{unit}"
-        outside_desc = f"阈值相邻值 {lo}{unit} / {hi}{unit}"
+        inside_desc = f"恰好达到阈值 {value}"
+        outside_desc = f"阈值相邻值 {lo} / {hi}"
         inside_expected = (
-            f"{cite}：输入 {value}{unit}（恰好达到阈值）时被接受；"
-            f"{cite}：输入 {hi}{unit}（多 1）触发阈值并被拒绝；"
-            f"{cite}：输入 {lo}{unit}（少 1）未达阈值不触发"
+            f"{cite}：输入 {value}（恰好达到阈值）时被接受；"
+            f"{cite}：输入 {hi}（多 1）触发阈值并被拒绝；"
+            f"{cite}：输入 {lo}（少 1）未达阈值不触发"
         )
         outside_expected = (
-            f"{cite}：阈值 {value}{unit}，输入 {lo}{unit}（少 1）未达阈值不触发，"
-            f"输入 {hi}{unit}（多 1）触发阈值并被拒绝"
+            f"{cite}：阈值 {value}，输入 {lo}（少 1）未达阈值不触发，"
+            f"输入 {hi}（多 1）触发阈值并被拒绝"
         )
 
     return [
@@ -427,22 +449,22 @@ def _boundary_direction_text(b: Boundary) -> str:
     只引用边界原文（调用方以「{b.text}」条款引用包裹）与边界 ±1 推导值，
     不写 PRD 之外的规则与后果（迭代 7 幻觉溯源）。
     """
-    value = _fmt_num(b.value)
-    lo = _fmt_num(b.value - 1)
-    hi = _fmt_num(b.value + 1)
+    value = _boundary_display(b, 0)
+    lo = _boundary_display(b, -1)
+    hi = _boundary_display(b, 1)
     if b.kind == "range_min":
         return (
-            f"输入 {value}{b.unit}（恰好达到最小值）被接受，"
-            f"{lo}{b.unit}（少 1）被拒绝，{hi}{b.unit}（多 1）被接受"
+            f"输入 {value}（恰好达到最小值）被接受，"
+            f"{lo}（少 1）被拒绝，{hi}（多 1）被接受"
         )
     if b.kind == "range_max":
         return (
-            f"输入 {value}{b.unit}（恰好达到最大值）被接受，"
-            f"{hi}{b.unit}（多 1）被拒绝，{lo}{b.unit}（少 1）被接受"
+            f"输入 {value}（恰好达到最大值）被接受，"
+            f"{hi}（多 1）被拒绝，{lo}（少 1）被接受"
         )
     return (
-        f"输入 {value}{b.unit}（恰好达到阈值）触发规则处理，"
-        f"{lo}{b.unit}（少 1）未达阈值不触发，{hi}{b.unit}（多 1）触发阈值并被拒绝"
+        f"输入 {value}（恰好达到阈值）触发规则处理，"
+        f"{lo}（少 1）未达阈值不触发，{hi}（多 1）触发阈值并被拒绝"
     )
 
 
@@ -570,11 +592,12 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
         if method == "边界值":
             if profile.boundaries:
                 b = profile.boundaries[0]
-                v, u = _fmt_num(b.value), b.unit
-                lo, hi = _fmt_num(b.value - 1), _fmt_num(b.value + 1)
+                v = _boundary_display(b, 0)
+                lo = _boundary_display(b, -1)
+                hi = _boundary_display(b, 1)
                 expected = (
-                    f"条款「{b.text}」：输入 {v}{u}（恰好达到边界值）时被接受；"
-                    f"条款「{b.text}」：输入 {lo}{u}（少 1）被拒绝，输入 {hi}{u}（多 1）被接受"
+                    f"条款「{b.text}」：输入 {v}（恰好达到边界值）时被接受；"
+                    f"条款「{b.text}」：输入 {lo}（少 1）被拒绝，输入 {hi}（多 1）被接受"
                 )
             else:
                 expected = (

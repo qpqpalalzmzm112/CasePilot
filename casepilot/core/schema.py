@@ -62,6 +62,9 @@ class GenerationResult(BaseModel):
     cases: list[TestCase] = Field(..., min_length=1, description="生成的测试用例集")
     mode: LLMMode = Field(..., description="LLM 网关模式：openai/ollama/mock")
     generated_at: datetime = Field(default_factory=datetime.now, description="生成时间")
+    fr_coverage_summary: str = Field(
+        "", description="FR 对账摘要（覆盖率核对表总结句，CLI 结束打印；无 FR 对账时为空）"
+    )
 
 
 class Feature(BaseModel):

@@ -168,18 +168,22 @@ class LLMGateway:
     def generate_raw_cases(self, profile: DocumentProfile) -> list[dict]:
         """生成用例原始 dict 列表；mock 模式走确定性规则引擎。
 
-        真实 LLM 模式带两道质量门禁（迭代 7 / UP-3）：
+        真实 LLM 模式带三道质量门禁（迭代 7 / UP-3，迭代 8 / UP-2）：
         1. JSON 解析 / 结构校验失败自动重试；
         2. 模糊词门禁拒绝——预期结果命中模糊词视为校验失败，把
-           「预期结果含模糊词 X，请改写为可验证的确定性表述」回灌提示词重试
-           （合计 ≤ CASEPILOT_LLM_MAX_RETRIES 次）；重试耗尽仍命中的用例
-           丢弃并输出中文告警（标题 + 命中词），全部丢弃时抛出清晰中文错误。
+           「预期结果含模糊词 X，请改写为可验证的确定性表述」回灌提示词重试；
+        3. 测量值预言禁令拒绝——预期结果预言实测值形态（「平均响应时间为 X 秒」
+           「错误率 X%」「吞吐达到 X」类）视为校验失败，把「性能预期只允许判定
+           标准形态（≤2s、≥100 QPS、不超过 X）」回灌提示词重试；
+        两道内容门禁合计重试 ≤ CASEPILOT_LLM_MAX_RETRIES 次；重试耗尽仍命中的
+        用例丢弃并输出中文告警（标题 + 命中明细），全部丢弃时抛出清晰中文错误。
         """
         if self.mode == "mock":
             return mock_engine.generate(profile)
 
         system = build_system_prompt()
         user = build_user_prompt(profile)
+        source_text = profile.summary_text()  # 测量值预言的「PRD 原文有据」判定依据
         base_url = get_base_url(self.mode)
         api_key = get_api_key() if self.mode == "openai" else None
         model = get_model(self.mode)
@@ -210,23 +214,31 @@ class LLMGateway:
                 continue
             last_parsed = raw_cases
             violations = quality.check_fuzzy_gate(raw_cases)
-            if not violations:
+            measured = quality.check_measurement_gate(raw_cases, source_text)
+            if not violations and not measured:
                 return raw_cases
-            # 模糊词门禁拒绝：命中即校验失败，回灌重试
-            last_error = ValueError(quality.build_fuzzy_feedback(violations))
+            # 内容门禁拒绝：模糊词 / 测量值预言命中即校验失败，合并反馈回灌重试
+            parts = []
+            if violations:
+                parts.append(quality.build_fuzzy_feedback(violations))
+            if measured:
+                parts.append(quality.build_measurement_feedback(measured))
+            last_error = ValueError("；".join(parts))
             if attempt < max_retries:
-                logger.warning("模糊词门禁拒绝（第 %d 次自动重试）：%s", attempt + 1, last_error)
+                logger.warning("质量门禁拒绝（第 %d 次自动重试）：%s", attempt + 1, last_error)
 
-        # 重试耗尽：解析成功过的输出按门禁丢弃仍含模糊词的用例并中文告警
+        # 重试耗尽：解析成功过的输出按门禁丢弃仍命中的用例并中文告警
         if last_parsed is not None:
             kept, warnings = quality.drop_fuzzy_cases(last_parsed)
+            kept, meas_warnings = quality.drop_measurement_cases(kept, source_text)
+            warnings = warnings + meas_warnings
             for line in warnings:
                 logger.warning(line)
             if kept:
                 return kept
             raise ValueError(
-                "模糊词门禁：重试耗尽后全部用例的预期结果仍含模糊词，已全部丢弃；"
-                "请改写为可验证的确定性表述（具体状态 / 提示语 / 数值）后重新生成"
+                "模糊词门禁 / 测量值预言禁令：重试耗尽后全部用例仍命中质量门禁，已全部丢弃；"
+                "请改写为可验证的确定性表述与判定标准形态（≤2s / ≥100 QPS / 不超过 X）后重新生成"
             )
         raise ValueError(
             f"LLM 输出解析 / 校验连续失败，已自动重试 {max_retries} 次仍不成功；"
