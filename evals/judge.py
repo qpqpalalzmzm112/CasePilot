@@ -44,9 +44,11 @@ from casepilot.core.quality import (
     GroundingReport,
     check_grounding,
     find_fuzzy_words,
+    find_tautologies,
+    find_weak_assertions,
 )
 from casepilot.core.schema import CATEGORIES, METHODS, PRIORITIES
-from casepilot.exporters.zentao_excel import ZENTAO_HEADERS
+from casepilot.exporters.zentao_excel import ZENTAO_HEADERS, split_keyword
 
 logger = logging.getLogger("casepilot")
 
@@ -133,6 +135,7 @@ def load_cases_from_excel(path: Union[str, Path]) -> list[dict]:
         values = [ws.cell(row=row, column=col).value for col in range(1, len(ZENTAO_HEADERS) + 1)]
         if not any(_cell(v) for v in values):
             continue  # 整行空白跳过
+        method, _assumed = split_keyword(_cell(values[7]))
         case = {
             "title": _cell(values[1]),
             "precondition": _cell(values[2]),
@@ -140,7 +143,7 @@ def load_cases_from_excel(path: Union[str, Path]) -> list[dict]:
             "expected": _cell(values[4]),
             "priority": _normalize_priority(values[5]),
             "category": _cell(values[6]),
-            "method": _cell(values[7]),
+            "method": method,
             "module": _cell(values[0]),
         }
         cases.append(case)
@@ -254,6 +257,9 @@ def _score_executability(case: dict) -> tuple[int, Optional[str]]:
 
     迭代 6 / UP-2：预期结果含模糊词（FUZZY_WORDS，复用 core/quality.py 词表）
     直接扣到 2 分——「或 / 可能 / 视情况」类表述无法形成唯一的通过 / 失败判定。
+    迭代 9 / UP-3 + UP-1：预期结果含弱断言（「返回正常 / 处理成功」类，复用
+    core/quality.py 词表）或同义复述条款（「系统接受有效输入并处理成功」类）
+    同样扣到 2 分——无具体可验证行为，执行后仍不知道验什么。
     """
     steps = case.get("steps", "").strip()
     expected = case.get("expected", "").strip()
@@ -266,6 +272,18 @@ def _score_executability(case: dict) -> tuple[int, Optional[str]]:
         return 2, (
             f"预期结果含模糊词「{'、'.join(fuzzy)}」，"
             "执行后无法形成唯一通过 / 失败判定，请改为明确判定标准"
+        )
+    weak = find_weak_assertions(expected)
+    if weak:
+        return 2, (
+            f"预期结果含弱断言「{'、'.join(weak)}」，无可校验行为，"
+            "请写明具体验证点（状态码 / 字段值 / 提示文案 / 界面元素）"
+        )
+    tautologies = find_tautologies(expected)
+    if tautologies:
+        return 2, (
+            f"预期结果只是复述需求条款、无可验证行为（同义反复：「{'」、「'.join(tautologies)}」），"
+            "请写明具体验证点（状态码 / 字段值 / 提示文案 / 界面元素）"
         )
     numbered = _step_count(steps) >= 2
     concrete = bool(_CONCRETE_RE.search(expected)) or len(expected) >= 15
@@ -396,7 +414,10 @@ JUDGE_SYSTEM_PROMPT = (
     f"2. {DIM_METHODOLOGY}：方法论标注合法（等价类/边界值/场景法/判定表/安全测试/性能测试）且与用例设计内容相符\n"
     f"3. {DIM_PRIORITY}：优先级（P0-P3）取值合理、用例集分布有区分度\n"
     f"4. {DIM_EXECUTABILITY}：步骤可操作、预期结果有可校验的判定标准，"
-    f"预期结果不得含模糊词（{'/'.join(FUZZY_WORDS)}）\n"
+    f"预期结果不得含模糊词（{'/'.join(FUZZY_WORDS)}），"
+    "不得含弱断言（返回正常 / 正常返回 / 处理成功 / 正常工作 / 显示正确）"
+    "或同义复述条款的空转表述（如「系统接受有效输入并处理成功」），"
+    "须写明具体验证点（状态码 / 字段值 / 提示文案 / 界面元素）\n"
     "输出要求：只输出一个合法 JSON 对象，不要任何解释文字或 markdown 代码块，结构为：\n"
     '{"cases": [{"title": "用例标题", "scores": {"'
     + DIM_COMPLETENESS + '": 5, "' + DIM_METHODOLOGY + '": 5, "'

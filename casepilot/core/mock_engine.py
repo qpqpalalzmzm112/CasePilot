@@ -60,6 +60,9 @@ _SECURITY_STRONG_RE = re.compile(
 _SECURITY_SOFT_RE = re.compile(r"安全|权限|锁定|验证码")
 # 性能类词：语义明确，命中即标注「性能测试」（原有 3 样例均不含这些词）
 _PERF_RE = re.compile(r"性能|并发|响应时间|压力|QPS|qps|吞吐|耗时")
+# 容量类表述（迭代 9 / UP-2）：「支持 10 万台设备」类容量目标同按性能测试处理，
+# 只产「目标规模下满足判定标准」用例，不发明超容后的行为
+_CAPACITY_RE = re.compile(r"支持\s*\d+(?:\.\d+)?\s*万?\s*台|设备规模|接入规模|容量目标")
 # 约束语境一：条目自身是约束性表述（防 / 禁止 / 不得 等）
 _CONSTRAINT_RE = re.compile(r"防止|防范|禁止|不得|不允许|必须|要求|拦截|防护|防(?!御)")
 # 约束语境二：条目位于安全 / 权限 / 非功能类小节
@@ -78,7 +81,7 @@ def classify_requirement(text: str, section: str = "") -> Optional[str]:
     """
     if _SECURITY_STRONG_RE.search(text):
         return "安全测试"
-    if _PERF_RE.search(text):
+    if _PERF_RE.search(text) or _CAPACITY_RE.search(text):
         return "性能测试"
     if _SECURITY_SOFT_RE.search(text) or _SECURITY_SOFT_RE.search(section):
         if _CONSTRAINT_RE.search(text) or _SECTION_CONTEXT_RE.search(section):
@@ -99,14 +102,22 @@ def _seconds_dual(total: float) -> str:
     return f"{t // 60} 分 {t % 60} 秒"
 
 
+def _timepoint_display(minutes: float) -> str:
+    """时间点展示（确定性）：420 → 「07:00」，相邻值按分钟进位（419 → 「06:59」）。"""
+    total = int(round(minutes)) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
 def _boundary_display(b: Boundary, delta: int = 0) -> str:
     """边界数值 / 两侧相邻值的展示文本（迭代 8 / UP-3 回归锁）。
 
     秒类阈值（120 ≤ 边界值 < 3600 秒）附分钟友好形态：
     「1800秒/30 分钟」（阈值本身）、「1799秒/29 分 59 秒」/「1801秒/30 分 1 秒」（两侧相邻值），
-    解锁边界两侧相邻值一目了然；其余单位展示与历史输出逐字一致（零漂移），
-    且只产出判定标准形态，不预言任何实测值。
+    解锁边界两侧相邻值一目了然；时间点边界按「HH:MM」展示（±1 分钟为前后时刻）；
+    其余单位展示与历史输出逐字一致（零漂移），且只产出判定标准形态，不预言任何实测值。
     """
+    if b.kind == "timepoint":
+        return _timepoint_display(b.value + delta)
     v = b.value + delta
     base = f"{_fmt_num(v)}{b.unit}"
     if b.unit == "秒" and 120 <= b.value < 3600:
@@ -121,13 +132,106 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
     （边界 ±1 相邻值）并写明方向（接受 / 拒绝 / 触发），每个断言片段均带
     条款引用，不引入 PRD 之外的规则与后果（迭代 7 幻觉溯源：清除编造规则模板）。
     安全 / 性能类需求的边界不再硬套「边界值」标注，改标专项方法论（迭代 6）。
+    迭代 9 / UP-2 NFR 寄生幻觉专防：性能 / 容量类边界只产出「目标规模下满足
+    判定标准」形态用例（≤X 秒 / ≥Y QPS / 目标规模达成），禁止断言超出目标
+    规模后的行为（超容表现 PRD 未定义，不生成任何硬性预期）。
+    迭代 9 / UP-3 时间点边界：07:00 / 22:00 类切换边界产出「时刻前 / 时刻整 /
+    时刻后」三时点对照用例。
     """
     # 专项方法论标注：安全 / 性能类需求 → 安全测试 / 性能测试，其余保持边界值
+    # （method 判定仍用 b.text 短片段，保证既有样例方法论分布零漂移）
     method = classify_requirement(b.text, b.section) or "边界值"
     value = _boundary_display(b, 0)
     lo = _boundary_display(b, -1)
     hi = _boundary_display(b, 1)
-    cite = f"条款「{b.text}」"
+    # 引用与标题用条款原文（迭代 9 / F3）：「条款「…」」逐字保留完整条款文本，
+    # 标题用边界片段（_snippet 已在语义边界截断，完整语义短语，绝不从数字 /
+    # 词语中间断开；保留阈值上下文，多阈值不漏测）
+    clause = b.clause or b.text
+    cite = f"条款「{clause}」"
+    core = b.text
+
+    if b.kind == "timepoint":
+        # 时间点切换边界（迭代 9 / UP-3）：时刻前 / 时刻整 / 时刻后三时点对照
+        return [
+            {
+                "title": f"【{method}】{core} - 切换时刻整 {value} 与前后时刻对照",
+                "precondition": "系统处于功能可用状态，测试数据已准备就绪",
+                "steps": (
+                    f"1. 按{cite}准备测试数据\n"
+                    f"2. 分别在 {lo}（时刻前）、{value}（时刻整）、{hi}（时刻后）观察{cite}的切换结果\n"
+                    f"3. 核对三个时点的处理结果"
+                ),
+                "expected": (
+                    f"{cite}：{lo}（切换时刻前）切换未生效；"
+                    f"{cite}：{value}（切换时刻整）切换生效；"
+                    f"{cite}：{hi}（切换时刻后）保持切换生效后的状态"
+                ),
+                "priority": "P1",
+                "category": "边界",
+                "method": method,
+                "module": f"{module}/边界验证",
+            },
+            {
+                "title": f"【{method}】{core} - 切换相邻时刻 {lo} / {hi}",
+                "precondition": "系统处于功能可用状态，测试数据已准备就绪",
+                "steps": (
+                    f"1. 按{cite}准备测试数据\n"
+                    f"2. 将观察时点分别调整为 {lo} 与 {hi}（{cite}）\n"
+                    f"3. 提交操作并观察{cite}的处理结果"
+                ),
+                "expected": (
+                    f"{cite}：{lo}（切换时刻前 1 分钟）切换未生效；"
+                    f"{cite}：{hi}（切换时刻后 1 分钟）保持切换生效后的状态；"
+                    f"{cite}：切换点为 {value}（切换时刻整）"
+                ),
+                "priority": "P2",
+                "category": "边界",
+                "method": method,
+                "module": f"{module}/边界验证",
+            },
+        ]
+
+    if method == "性能测试":
+        # 性能 / 容量类边界（迭代 9 / UP-2）：只产判定标准形态，不发明超容行为
+        return [
+            {
+                "title": f"【{method}】{core} - 目标规模 {value} 判定标准验证",
+                "precondition": "测试环境可按目标规模施加负载，测试数据已准备就绪",
+                "steps": (
+                    f"1. 按{cite}准备测试数据\n"
+                    f"2. 将负载 / 输入规模调整为 {value}（{cite}）\n"
+                    f"3. 提交操作并按{cite}的判定标准记录结果"
+                ),
+                "expected": (
+                    f"{cite}：在 {value}（目标规模）下满足{cite}的判定标准；"
+                    f"{cite}：{lo}（少 1）为规模内对照点，同样满足{cite}的判定标准"
+                ),
+                "priority": "P1",
+                "category": "边界",
+                "method": method,
+                "module": f"{module}/边界验证",
+            },
+            {
+                "title": f"【{method}】{core} - 边界对照点 {lo} / {hi}",
+                "precondition": "测试环境可按目标规模施加负载，测试数据已准备就绪",
+                "steps": (
+                    f"1. 按{cite}准备测试数据\n"
+                    f"2. 将负载 / 输入规模分别调整为 {lo} 与 {hi}（{cite}）\n"
+                    f"3. 记录对照点结果并按{cite}的判定标准核对"
+                ),
+                "expected": (
+                    f"{cite}：验收判定标准以 {value}（目标规模）为准；"
+                    f"{cite}：{lo}（少 1）与 {hi}（多 1）仅作边界对照观察点记录；"
+                    f"{cite}：超出 {value} 的行为未在 PRD 定义（不作任何行为断言）"
+                ),
+                "priority": "P2",
+                "category": "边界",
+                "method": method,
+                "module": f"{module}/边界验证",
+            },
+        ]
+
     if b.kind == "range_min":
         inside_desc, outside_desc = f"最小值 {value}", f"低于最小值 {lo}"
         inside_expected = (
@@ -163,7 +267,7 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
 
     return [
         {
-            "title": f"【{method}】{b.text} - 取边界值{inside_desc}",
+            "title": f"【{method}】{core} - 取边界值{inside_desc}",
             "precondition": "系统处于功能可用状态，测试数据已准备就绪",
             "steps": (
                 f"1. 按{cite}准备测试数据\n"
@@ -177,7 +281,7 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
             "module": f"{module}/边界验证",
         },
         {
-            "title": f"【{method}】{b.text} - 取越界值{outside_desc}",
+            "title": f"【{method}】{core} - 取越界值{outside_desc}",
             "precondition": "系统处于功能可用状态，测试数据已准备就绪",
             "steps": (
                 f"1. 按{cite}准备测试数据\n"
@@ -193,39 +297,96 @@ def _boundary_cases(b: Boundary, module: str) -> list[dict]:
     ]
 
 
+# 纯质量属性词（迭代 9 / F2）：「良好的用户体验」「高性能」「易用性」类
+# 抽象质量描述，不含任何可验证要素时补不出可验证用例
+_QUALITY_ATTR_RE = re.compile(
+    r"良好|优秀|友好|易用|美观|流畅|稳定|高效|可靠|体验|人性化|满意|完善|健壮|可扩展|可维护"
+)
+
+
+def _is_unverifiable_clause(name: str) -> bool:
+    """条款是否「补不出可验证用例」（迭代 9 / F2）：纯质量属性描述且无任何
+    可验证要素（无数字 / 阈值、「」提示文案、具体可校验行为）。
+
+    「系统应具备良好的用户体验」→ True（禁止产出「接受有效输入并成功执行」
+    类同义反复通用条目，改登记未覆盖清单）；
+    「支持优惠券满减计算」「密码必须同时包含字母和数字」等有具体动作 / 对象
+    的条款 → False（仍产等价类用例，既有样例计数零漂移）。
+    """
+    if re.search(r"\d", name) or "「" in name:
+        return False  # 数值 / 提示文案是可验证要素
+    return bool(_QUALITY_ATTR_RE.search(name))
+
+
+# 行为动词（迭代 9 / F6）：用于从条款提取可观察行为要素（动宾短语）作验证点
+_BEHAVIOR_VERBS = (
+    r"触发|切换|弹出|展示|发送|推送|通知|生成|锁定|解锁|取消|更新|返回|执行|计费|扣费|抵扣|"
+    r"跳转|显示|提示|允许|拒绝|支持|校验|验证|匹配|计算|发放|登记|创建|删除|修改|查询|"
+    r"登录|注册|支付|下单|退款|同步|加载|保存|提交|审核|分配|保留|过期|失效|挤下线|重置|"
+    r"拦截|脱敏|篡改|注入"
+)
+_BEHAVIOR_RE = re.compile(rf"(?:{_BEHAVIOR_VERBS})[^，。；,;：:（(]*")
+# 条款内「」提示文案（可观察界面元素）
+_QUOTE_PROMPT_RE = re.compile(r"「([^」]*)」")
+
+
+def _extract_behavior_elements(name: str) -> list[str]:
+    """从条款提取可观察行为要素（迭代 9 / F6）作验证点。
+
+    验证点必须从**条款内容**推导（动宾短语 / 「」提示语 / 数值判定），
+    写成可观察结果（如 FR-1「触发短信验证码二次确认」、FR-2「切换为谷电价格」）；
+    禁用「对应数据完成更新（数据变化可见）」类所有条款共用的通用后缀——
+    通用后缀不单独算验证点。提取不到行为要素时兜底条款名本身（接口调用即
+    行为），保证等价类用例计数零漂移；纯质量属性条款已由 _is_unverifiable_clause
+    拦截（走未覆盖清单，不产通用条目）。
+    """
+    elements: list[str] = []
+    # 1) 「」提示语（可观察界面提示，逐字引用条款原文）
+    for q in _QUOTE_PROMPT_RE.findall(name):
+        q = q.strip()
+        if q:
+            elements.append(f"提示「{q}」")
+    # 2) 行为动词短语（动词 + 宾语，到句读 / 括号止）
+    for m in _BEHAVIOR_RE.finditer(name):
+        s = m.group(0).strip()
+        if s and s not in elements:
+            elements.append(s)
+    # 3) 兜底：条款名本身（接口 / 动宾短语），保证非空
+    if not elements:
+        elements.append(name)
+    return elements
+
+
 def _equivalence_cases(f: Feature, module: str) -> list[dict]:
     """规则 2：功能点 / 接口 → 等价类用例（有效类 P1 + 无效类 P2）。
 
     步骤与预期结果只引用功能点 / 接口原文（f.name）等 PRD 条款要素，
     每个断言片段均带条款引用，不写 PRD 之外的规则与后果（迭代 7 幻觉溯源）。
     安全 / 性能类需求改标专项方法论（迭代 6），标题标记与 method 保持一致。
+    迭代 9 / F2：条款不含任何可验证要素（纯质量属性描述，如「系统应具备良好的
+    用户体验」）→ 不产出通用条目（禁止「接受有效输入并成功执行」类同义反复凑数），
+    交由对账登记「⚠ 未覆盖（已列清单）」+ 具体设计建议；其余条款的通用预期
+    必须含具体验证点（数据 / 状态变化等可观察结果），不再是零可验证行为的换皮模板。
     """
+    if _is_unverifiable_clause(f.name):
+        return []
     valid_category = "接口" if f.kind == "api" else "功能"
     method = classify_requirement(f.name, f.section) or "等价类"
+    # F6：验证点 = 从条款推导的行为要素（动宾短语 / 「」提示语 / 数值），
+    # 禁用「对应数据完成更新（数据变化可见）」「…定义一致」「处理状态可逐项核对」
+    # 等通用后缀 / 死短语——通用后缀不单独算验证点，条款提取不到行为要素时
+    # 兜底条款名（见 _extract_behavior_elements），纯质量属性条款走未覆盖清单。
+    behavior = "；".join(_extract_behavior_elements(f.name)[:2])
     if method == "等价类":
         valid_title = f"【等价类】{f.name} - 有效等价类验证"
         invalid_title = f"【等价类】{f.name} - 无效等价类验证"
-        valid_expected = (
-            f"条款「{f.name}」：系统接受有效等价类输入并成功执行「{f.name}」；"
-            f"条款「{f.name}」：返回结果与「{f.name}」的需求定义一致"
-        )
-        invalid_expected = (
-            f"条款「{f.name}」：系统拒绝「{f.name}」的无效等价类输入；"
-            f"条款「{f.name}」：「{f.name}」不被执行；"
-            f"条款「{f.name}」：返回结果与「{f.name}」的拒绝定义一致"
-        )
+        valid_expected = f"条款「{f.name}」：满足输入条件时 {behavior}"
+        invalid_expected = f"条款「{f.name}」：无效输入下 {behavior} 不发生"
     else:
         valid_title = f"【{method}】{f.name} - 有效输入验证"
         invalid_title = f"【{method}】{f.name} - 异常输入验证"
-        valid_expected = (
-            f"条款「{f.name}」：系统按「{f.name}」的需求规则处理有效输入并处理成功；"
-            f"条款「{f.name}」：返回结果与「{f.name}」的需求定义一致"
-        )
-        invalid_expected = (
-            f"条款「{f.name}」：系统拦截「{f.name}」的无效输入；"
-            f"条款「{f.name}」：「{f.name}」不被执行；"
-            f"条款「{f.name}」：返回结果与「{f.name}」的拦截定义一致"
-        )
+        valid_expected = f"条款「{f.name}」：满足判定标准，{behavior}"
+        invalid_expected = f"条款「{f.name}」：异常输入下 {behavior} 不发生"
     return [
         {
             "title": valid_title,
@@ -318,7 +479,7 @@ def _scenario_cases(profile: DocumentProfile) -> list[dict]:
             "module": f"{module}/场景验证",
         },
         {
-            "title": "【场景法】异常流：中途失败后的回滚与提示",
+            "title": "【场景法】异常流：中途失败后的拒绝处理",
             "precondition": "初始状态正常，测试账号 / 数据已准备就绪",
             "steps": (
                 f"1. 按主流程执行：{flow_line}\n"
@@ -366,7 +527,9 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
                 f"2. 条件全部成立时执行目标操作：{cond_join}\n"
                 f"3. 核对系统动作与判定表定义一致：{cond_join}"
             ),
-            "expected": f"全部条件成立时系统执行目标操作并与判定表定义一致：{cond_join}",
+            "expected": (
+                f"全部条件成立时系统执行目标操作：{cond_join}"
+            ),
             "priority": "P1",
             "category": category,
             "method": "判定表",
@@ -381,7 +544,7 @@ def _decision_table_cases(profile: DocumentProfile) -> list[dict]:
                 f"3. 核对系统动作与判定表定义一致：{cond_join}"
             ),
             "expected": (
-                f"仅部分条件成立时系统拒绝该操作并走判定表定义的备选动作：{cond_join}"
+                f"仅部分条件成立时系统拒绝该操作：{cond_join}"
             ),
             "priority": "P2",
             "category": "异常",
@@ -508,7 +671,7 @@ def _endpoint_cases(profile: DocumentProfile) -> list[dict]:
                 ),
                 "expected": (
                     f"依次调用{names}完成{group.key} 资源接口主流程："
-                    f"各接口响应状态与「{group.features[0].name}」的接口定义一致"
+                    f"各接口返回对应响应状态与响应体"
                 ),
                 "priority": "P1",
                 "category": "接口",
@@ -518,7 +681,7 @@ def _endpoint_cases(profile: DocumentProfile) -> list[dict]:
         )
 
     # 参数边界专项：投给缺口最大的资源（按未覆盖边界数降序、文档顺序取先）
-    selected = set(id(b) for b in profile.boundaries[:MAX_BOUNDARIES])
+    selected = set(id(b) for b in _select_boundaries(profile))
     def _gap_size(group: _ResourceGroup) -> int:
         return sum(1 for b in _resource_boundaries(group, profile.boundaries) if id(b) not in selected)
 
@@ -526,7 +689,10 @@ def _endpoint_cases(profile: DocumentProfile) -> list[dict]:
     uncovered = [b for b in _resource_boundaries(target, profile.boundaries) if id(b) not in selected]
     if uncovered:
         merged = uncovered[:MAX_ENDPOINT_BOUNDARIES]
-        parts = "；".join(f"「{b.text}」：{_boundary_direction_text(b)}" for b in merged)
+        # 引文逐字保留条款原文（迭代 9 / F3），标题用条款核心短语（语义边界截断）
+        def _cite(b: Boundary) -> str:
+            return f"「{b.clause or b.text}」"
+        parts = "；".join(f"{_cite(b)}：{_boundary_direction_text(b)}" for b in merged)
         cases.append(
             {
                 "title": (
@@ -535,9 +701,9 @@ def _endpoint_cases(profile: DocumentProfile) -> list[dict]:
                 ),
                 "precondition": f"接口服务可用，{target.key} 资源接口可正常调用",
                 "steps": (
-                    f"1. 按「{merged[0].text}」准备{target.key} 资源接口的参数边界测试数据\n"
-                    f"2. 按「{merged[0].text}」分别提交边界值与两侧相邻值参数\n"
-                    f"3. 核对「{merged[0].text}」的接口响应与参数校验结果"
+                    f"1. 按{_cite(merged[0])}准备{target.key} 资源接口的参数边界测试数据\n"
+                    f"2. 按{_cite(merged[0])}分别提交边界值与两侧相邻值参数\n"
+                    f"3. 核对{_cite(merged[0])}的接口响应与参数校验结果"
                 ),
                 "expected": parts,
                 "priority": "P1",
@@ -592,12 +758,13 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
         if method == "边界值":
             if profile.boundaries:
                 b = profile.boundaries[0]
+                b_cite = f"条款「{b.clause or b.text}」"
                 v = _boundary_display(b, 0)
                 lo = _boundary_display(b, -1)
                 hi = _boundary_display(b, 1)
                 expected = (
-                    f"条款「{b.text}」：输入 {v}（恰好达到边界值）时被接受；"
-                    f"条款「{b.text}」：输入 {lo}（少 1）被拒绝，输入 {hi}（多 1）被接受"
+                    f"{b_cite}：输入 {v}（恰好达到边界值）时被接受；"
+                    f"{b_cite}：输入 {lo}（少 1）被拒绝，输入 {hi}（多 1）被接受"
                 )
             else:
                 expected = (
@@ -606,8 +773,8 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
                 )
         elif anchor:
             expected = (
-                f"{anchor}：按{method}方法论验证{category}类输入并处理成功；"
-                f"{anchor}：结果与{anchor}的条款定义一致"
+                f"{anchor}：按{method}方法论验证{category}类输入，{anchor}按条款定义完成处理；"
+                f"{anchor}：{anchor}对应行为可观察"
             )
         else:
             expected = "系统行为符合需求规则定义，无异常与数据不一致"
@@ -630,13 +797,37 @@ def _pad_cases(raw_cases: list[dict], profile: DocumentProfile) -> list[dict]:
         i += 1
 
 
+def _select_boundaries(profile: DocumentProfile) -> list[Boundary]:
+    """边界选取（迭代 9 / UP-3 多阈值边界完整性）：同一条款（clause）的多个
+    数值 / 时间点阈值成组选取——组起点在 MAX_BOUNDARIES 预算内即整组纳入
+    （可略超预算），保证「每个阈值都产出边界用例」，不得只测第一个；
+    无条款归属的边界（如 OpenAPI schema 约束）各自成组，行为与逐条截断一致。
+    """
+    groups: dict[str, list[Boundary]] = {}
+    order: list[str] = []
+    for b in profile.boundaries:
+        key = b.clause or f"__solo_{id(b)}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(b)
+
+    selected: list[Boundary] = []
+    for key in order:
+        if len(selected) >= MAX_BOUNDARIES:
+            break
+        selected.extend(groups[key])
+    return selected
+
+
 def generate(profile: DocumentProfile) -> list[dict]:
     """按规则生成用例原始 dict 列表（确定性，同一输入输出完全一致）。"""
     module = profile.module
     raw_cases: list[dict] = []
 
-    # 规则 1：数字边界 → 边界值用例（控制规模，少而精）
-    for b in profile.boundaries[:MAX_BOUNDARIES]:
+    # 规则 1：数字边界 / 时间点边界 → 边界值用例（控制规模，少而精；
+    # 同条款多阈值整组选取，迭代 9 / UP-3）
+    for b in _select_boundaries(profile):
         raw_cases.extend(_boundary_cases(b, module))
 
     # 规则 2：功能点 / 接口 → 等价类用例（控制规模，少而精）

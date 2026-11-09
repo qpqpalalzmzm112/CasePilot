@@ -33,6 +33,23 @@ PRIORITY_MAP = {"P0": 1, "P1": 2, "P2": 3, "P3": 4}
 # Sheet 名（禅道导入识别名）
 SHEET_NAME = "用例"
 
+# 衍生 / 假设类用例的关键词标注后缀（迭代 9 / UP-2）：「场景法,假设」逗号并列，
+# Excel 8 列模板不变，标注只出现在「关键词」列
+ASSUMPTION_TAG = "假设"
+
+
+def keyword_value(method: str, assumption: bool = False) -> str:
+    """关键词列取值：方法论 + 可选「,假设」标注（如「场景法,假设」）。"""
+    return f"{method},{ASSUMPTION_TAG}" if assumption else method
+
+
+def split_keyword(value: str) -> tuple[str, bool]:
+    """关键词列取值反解析：（方法论, 是否假设标注）。"""
+    text = (value or "").strip()
+    if text.endswith(f",{ASSUMPTION_TAG}"):
+        return text[: -len(ASSUMPTION_TAG) - 1].strip(), True
+    return text, False
+
 # 各列宽度（便于人工审阅）
 _COLUMN_WIDTHS = [24, 44, 28, 48, 44, 8, 10, 10]
 
@@ -46,7 +63,7 @@ def _write_header(ws: Worksheet) -> None:
 
 
 def _case_to_row(case: TestCase) -> list:
-    """把 TestCase 映射为禅道一行数据。"""
+    """把 TestCase 映射为禅道一行数据（关键词列带「,假设」标注，迭代 9 / UP-2）。"""
     return [
         case.module,
         case.title,
@@ -55,7 +72,7 @@ def _case_to_row(case: TestCase) -> list:
         case.expected,
         PRIORITY_MAP[case.priority],
         case.category,
-        case.method,
+        keyword_value(case.method, case.assumption),
     ]
 
 

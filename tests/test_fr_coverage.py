@@ -155,8 +155,9 @@ class TestReconciliation:
         assert report is not None
         assert report.filled_count == 0, "两个样例的 FR 均应被规则生成用例命中，无需补齐"
 
-    def test_gap_fr_auto_filled_and_marked(self):
-        """验收：部分 FR 不被规则命中时自动补齐，报告标「已补齐」。"""
+    def test_gap_fr_registered_uncovered_without_filler(self):
+        """迭代 9 / UP-1：部分 FR 补不出具体用例时登记未覆盖清单（含具体设计建议），
+        不再模板填塞「系统接受有效输入并处理成功」类条目。"""
         profile = prd.parse_text(GAP_PRD, source="gap.md")
         raw = mock_engine.generate(profile)
         cases = validate_cases(raw)
@@ -164,25 +165,49 @@ class TestReconciliation:
 
         merged, report = reconcile_fr_coverage(profile, cases)
         assert report is not None
-        assert report.filled_count == 2
-        assert report.added_cases == 4
-        assert len(merged) == len(cases) + 4
+        assert report.filled_count == 0, "禁用模板填塞：补不出具体用例不得凑数补齐"
+        assert report.added_cases == 0
+        assert len(merged) == len(cases), "用例集不得因凑数覆盖而膨胀"
 
-        filled = [item for item in report.items if item.filled]
-        assert [item.fr_id for item in filled] == ["FR-auto-7", "FR-auto-8"]
+        uncovered = report.uncovered_items
+        assert [item.fr_id for item in uncovered] == ["FR-auto-7", "FR-auto-8"]
+        for item in uncovered:
+            assert item.suggestion.startswith("建议"), item.fr_id
+            assert "支持功能点" in item.suggestion, "设计建议须引用条款要素，禁止空话"
         text = format_fr_coverage_report(report)
-        assert "已补齐" in text
-        assert "其中自动补齐 2 条 FR（新增 4 条用例）" in text
-        # 补齐用例标题带原文编号追溯前缀，且每个 FR ≥1 条
-        for fr_id in ("FR-auto-7", "FR-auto-8"):
-            assert any(f"[{fr_id}]" in c.title for c in merged)
+        assert "未覆盖清单" in text
+        assert "⚠ 未覆盖（已列清单）" in text
+        # 无任何「已补齐」条目行（图例说明除外），亦无同义反复模板
+        assert "✓ 已补齐（具体化补齐） |" not in text
+        assert "系统接受有效输入并处理成功" not in text
+
+    def test_concrete_fill_when_clause_has_elements(self):
+        """条款含具体要素（数值 / 提示文案）时具体化补齐：预期含具体验证点，标记「已补齐」。"""
+        text = (
+            "# 需求\n\n## 功能清单\n\n"
+            + "".join(f"- 支持功能点{i}\n" for i in range(1, 8))
+            + "\n## 安全要求\n\n- 防 SQL 注入拦截，命中时提示「请求非法」\n"
+        )
+        profile = prd.parse_text(text, source="gap3.md")
+        merged, report = reconcile_fr_coverage(profile, [])
+        security_frs = [f for f in profile.frs if "注入" in f.text]
+        assert security_frs, "构造输入应含安全类 FR"
+        for fr in security_frs:
+            filled = [c for c in merged if c.title.startswith(fr.tag)]
+            assert filled, f"{fr.tag} 含提示文案要素，应具体化补齐"
+            assert all("（具体化补齐）" in c.title for c in filled)
+            assert all(c.method == "安全测试" for c in filled)
+            # 具体验证点：提示文案逐字引用
+            assert all("「请求非法」" in c.expected for c in filled)
+        assert report.filled_count == 1
+        assert any(item.suggestion for item in report.items), "要素缺失的 FR 登记未覆盖"
 
     def test_backfill_method_follows_fr_content(self):
-        """缺漏 FR 的补齐用例按 FR 内容选方法论：安全 / 性能词 → 安全测试 / 性能测试。"""
+        """缺漏 FR 的具体化补齐按 FR 内容选方法论：安全 / 性能词 → 安全测试 / 性能测试。"""
         text = (
             "# 需求\n\n## 功能清单\n\n"
             + "".join(f"- 支持功能点{i}\n" for i in range(1, 9))
-            + "\n## 安全要求\n\n- 防 SQL 注入拦截\n"
+            + "\n## 安全要求\n\n- 防 SQL 注入拦截，命中时提示「请求非法」\n"
         )
         profile = prd.parse_text(text, source="gap2.md")
         cases = validate_cases(mock_engine.generate(profile))
@@ -190,8 +215,8 @@ class TestReconciliation:
         security_frs = [f for f in profile.frs if "注入" in f.text]
         assert security_frs, "构造输入应含安全类 FR"
         for fr in security_frs:
-            backfilled = [c for c in merged if c.title.startswith(fr.tag) and "自动补齐" in c.title]
-            assert backfilled, f"{fr.tag} 应被自动补齐"
+            backfilled = [c for c in merged if c.title.startswith(fr.tag) and "具体化补齐" in c.title]
+            assert backfilled, f"{fr.tag} 应被具体化补齐"
             assert all(c.method == "安全测试" for c in backfilled)
 
     def test_report_markdown_format(self):
@@ -199,11 +224,13 @@ class TestReconciliation:
         cases = validate_cases(mock_engine.generate(profile))
         _, report = reconcile_fr_coverage(profile, cases)
         text = format_fr_coverage_report(report)
-        # 迭代 8：核对表升级为「PRD 条款 → 用例编号」映射
+        # 迭代 8/9：核对表为「PRD 条款 → 用例编号」映射 + 三态 + 未覆盖清单
         assert "| 编号 | 原文摘要 | 覆盖用例编号 | 状态 |" in text
         assert "| FR-auto-1 | 支持功能点1 |" in text
-        assert "FR 覆盖率 100%（8/8）" in text
-        assert "✓" in text and "已补齐" in text
+        assert "FR 覆盖率" in text
+        assert "✓ 质量覆盖" in text
+        assert "⚠ 未覆盖（已列清单）" in text
+        assert "## 未覆盖清单（含具体设计建议）" in text
 
     def test_report_notes_auto_numbering_fallback(self):
         """无编号文档的对账报告必须注明「自动编号」兜底（迭代 7 / UP-1）。"""
@@ -262,6 +289,70 @@ class TestReportFile:
             generate_from_file(BOUNDARY_PRD, mode="mock")
         assert "FR 需求对账报告" in caplog.text
         assert "FR 覆盖率 100%（5/5）" in caplog.text
+
+
+class TestDesignSuggestionAndTimepointFill:
+    """迭代 9 / UP-1：要素化设计建议（阈值 / 时间点 / 提示文案）+ 时间点条款具体化补齐。"""
+
+    ELEMENTS_PRD = (
+        "# 需求\n\n## 提醒规则\n\n"
+        "FR-1：单笔超 10000 或当日累计 50000 触发短信提醒\n"
+        "FR-2：07:00/22:00 电价切换\n"
+        "FR-3：弹窗提示「操作成功」\n"
+    )
+
+    def test_suggestion_derives_from_clause_elements(self, monkeypatch):
+        """未覆盖清单的建议从条款要素推导：阈值两侧相邻值 / 时刻前后 / 提示文案逐字。"""
+        monkeypatch.setattr(
+            "casepilot.core.generator._fr_backfill_cases", lambda fr, module: []
+        )
+        profile = prd.parse_text(self.ELEMENTS_PRD, source="s.md")
+        merged, report = reconcile_fr_coverage(profile, [])
+        assert merged == []
+        by_id = {item.fr_id: item.suggestion for item in report.items}
+        assert "阈值 10000" in by_id["FR-1"] and "9999 不触发" in by_id["FR-1"]
+        assert "阈值 50000" in by_id["FR-1"] and "49999 不触发" in by_id["FR-1"]
+        assert "切换时刻前（06:59）/时刻整（07:00）/时刻后（07:01）" in by_id["FR-2"]
+        assert "提示「操作成功」逐字一致" in by_id["FR-3"]
+
+    def test_timepoint_clause_fill(self):
+        """时间点条款具体化补齐：切换时刻前 / 整 / 后三时点对照用例。"""
+        profile = prd.parse_text(self.ELEMENTS_PRD, source="s.md")
+        merged, report = reconcile_fr_coverage(profile, [])
+        filled = [c for c in merged if c.title.startswith("[FR-2]")]
+        assert filled, "时间点条款应具体化补齐"
+        joined = "\n".join(f"{c.title}\n{c.expected}" for c in filled)
+        assert "06:59" in joined and "07:00" in joined and "07:01" in joined
+        assert "21:59" in joined and "22:00" in joined and "22:01" in joined
+
+    def test_prompt_only_clause_fill_cites_prompt(self):
+        """仅含提示文案的条款产 1 条判定标准用例，提示逐字引用。"""
+        profile = prd.parse_text(self.ELEMENTS_PRD, source="s.md")
+        merged, _ = reconcile_fr_coverage(profile, [])
+        filled = [c for c in merged if c.title.startswith("[FR-3]")]
+        assert len(filled) == 1
+        assert "「操作成功」" in filled[0].expected
+        assert filled[0].title.endswith("（具体化补齐）")
+
+    def test_fill_summary_no_ellipsis(self):
+        """修 bug：标题摘要取条款核心短语，不带省略号「…」。"""
+        from casepilot.core.generator import _fr_summary
+
+        assert "…" not in _fr_summary("支持忘记密码找回，通过短信验证码验证身份后重置密码，整块需求覆盖")
+        assert _fr_summary("支持忘记密码找回，通过短信验证码验证身份后重置密码") == "支持忘记密码找回"
+
+    def test_fill_module_not_document_name(self):
+        """修 bug：补齐用例模块取「父模块/子模块」真实路径，不把文档名当模块。"""
+        profile = prd.parse_text(
+            "# 优惠券系统需求规格说明书\n\n## 非功能需求\n\nNFR-1：优惠券核销接口响应时间 ≤2 秒\n",
+            source="m.md",
+        )
+        merged, _ = reconcile_fr_coverage(profile, [])
+        filled = [c for c in merged if c.title.startswith("[NFR-1]")]
+        assert filled
+        for c in filled:
+            assert c.module == "非功能需求/性能验证", c.module
+            assert "需求规格说明书" not in c.module
 
 
 class TestTitlePrefix:

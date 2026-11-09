@@ -168,14 +168,17 @@ class LLMGateway:
     def generate_raw_cases(self, profile: DocumentProfile) -> list[dict]:
         """生成用例原始 dict 列表；mock 模式走确定性规则引擎。
 
-        真实 LLM 模式带三道质量门禁（迭代 7 / UP-3，迭代 8 / UP-2）：
+        真实 LLM 模式带四道质量门禁（迭代 7 / UP-3，迭代 8 / UP-2，迭代 9 / UP-3）：
         1. JSON 解析 / 结构校验失败自动重试；
         2. 模糊词门禁拒绝——预期结果命中模糊词视为校验失败，把
            「预期结果含模糊词 X，请改写为可验证的确定性表述」回灌提示词重试；
         3. 测量值预言禁令拒绝——预期结果预言实测值形态（「平均响应时间为 X 秒」
            「错误率 X%」「吞吐达到 X」类）视为校验失败，把「性能预期只允许判定
            标准形态（≤2s、≥100 QPS、不超过 X）」回灌提示词重试；
-        两道内容门禁合计重试 ≤ CASEPILOT_LLM_MAX_RETRIES 次；重试耗尽仍命中的
+        4. 弱断言禁令拒绝——预期结果含「返回正常 / 处理成功」类无具体行为表述
+           视为校验失败，把「请写明具体验证点（状态码 / 字段值 / 提示文案 /
+           界面元素）」回灌提示词重试；
+        内容门禁合计重试 ≤ CASEPILOT_LLM_MAX_RETRIES 次；重试耗尽仍命中的
         用例丢弃并输出中文告警（标题 + 命中明细），全部丢弃时抛出清晰中文错误。
         """
         if self.mode == "mock":
@@ -215,14 +218,17 @@ class LLMGateway:
             last_parsed = raw_cases
             violations = quality.check_fuzzy_gate(raw_cases)
             measured = quality.check_measurement_gate(raw_cases, source_text)
-            if not violations and not measured:
+            weak = quality.check_weak_gate(raw_cases)
+            if not violations and not measured and not weak:
                 return raw_cases
-            # 内容门禁拒绝：模糊词 / 测量值预言命中即校验失败，合并反馈回灌重试
+            # 内容门禁拒绝：模糊词 / 测量值预言 / 弱断言命中即校验失败，合并反馈回灌重试
             parts = []
             if violations:
                 parts.append(quality.build_fuzzy_feedback(violations))
             if measured:
                 parts.append(quality.build_measurement_feedback(measured))
+            if weak:
+                parts.append(quality.build_weak_feedback(weak))
             last_error = ValueError("；".join(parts))
             if attempt < max_retries:
                 logger.warning("质量门禁拒绝（第 %d 次自动重试）：%s", attempt + 1, last_error)
@@ -231,14 +237,16 @@ class LLMGateway:
         if last_parsed is not None:
             kept, warnings = quality.drop_fuzzy_cases(last_parsed)
             kept, meas_warnings = quality.drop_measurement_cases(kept, source_text)
-            warnings = warnings + meas_warnings
+            kept, weak_warnings = quality.drop_weak_cases(kept)
+            warnings = warnings + meas_warnings + weak_warnings
             for line in warnings:
                 logger.warning(line)
             if kept:
                 return kept
             raise ValueError(
-                "模糊词门禁 / 测量值预言禁令：重试耗尽后全部用例仍命中质量门禁，已全部丢弃；"
-                "请改写为可验证的确定性表述与判定标准形态（≤2s / ≥100 QPS / 不超过 X）后重新生成"
+                "模糊词门禁 / 测量值预言禁令 / 弱断言禁令：重试耗尽后全部用例仍命中质量门禁，已全部丢弃；"
+                "请改写为可验证的确定性表述与判定标准形态（≤2s / ≥100 QPS / 不超过 X），"
+                "并写明具体验证点（状态码 / 字段值 / 提示文案 / 界面元素）后重新生成"
             )
         raise ValueError(
             f"LLM 输出解析 / 校验连续失败，已自动重试 {max_retries} 次仍不成功；"

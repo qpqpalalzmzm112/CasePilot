@@ -40,7 +40,15 @@ LOGIN_FULL_PRD = EXAMPLES_DIR / "prd_login_full.md"
 runner = CliRunner()
 ALL_SAMPLES = [LOGIN_PRD, PETSTORE_OPENAPI, BOUNDARY_PRD, SECURITY_PERF_PRD, NUMBERED_PRD]
 
-# 迭代 8 零漂移基线：5 样例 + 新 fixture 的用例数与方法论 / 类型分布硬编码锁定
+# 迭代 8/9 零漂移基线：5 样例 + 新 fixture 的用例数与方法论 / 类型分布硬编码锁定。
+# 迭代 9 计数变化明细（仅移除模板水分条目 + 多阈值完整性补齐，好用例零损失）：
+# - prd_numbered 33 → 31：删 NFR-1.1 / NFR-1.2 的「异常类验证（自动补齐）」模板条目 2 条
+#   （「系统接受有效输入并处理成功」同义反复），改为具体化补齐各 1 条判定标准用例；
+# - prd_security_perf 35 → 31：删 4 个性能 FR 的「异常类验证（自动补齐）」模板条目 4 条，
+#   改为具体化补齐各 1 条「目标规模下满足判定标准」用例；
+# - prd_login_full 27 → 31：多阈值完整性（UP-3）——FR-3 条款 6 个阈值全部产出边界用例，
+#   新增「60 秒验证码有效期」「连续 3 次输错」2 个阈值的 4 条边界用例（新增覆盖，非删减）；
+# - prd_login 27 / prd_boundary 25 / openapi_petstore 30：计数不变。
 REGRESSION_BASELINE = {
     "prd_login.md": {
         "count": 27,
@@ -58,19 +66,20 @@ REGRESSION_BASELINE = {
         "categories": {"功能": 8, "异常": 7, "边界": 10},
     },
     "prd_security_perf.md": {
-        "count": 35,
-        "methods": {"安全测试": 18, "性能测试": 12, "场景法": 3, "判定表": 2},
-        "categories": {"功能": 13, "异常": 12, "边界": 10},
+        # 迭代 9 F3 引文完整化：FR-auto-8 由边界用例正确覆盖，去掉 1 条重复补齐水分
+        "count": 30,
+        "methods": {"安全测试": 18, "性能测试": 7, "场景法": 3, "判定表": 2},
+        "categories": {"功能": 12, "异常": 8, "边界": 10},
     },
     "prd_numbered.md": {
-        "count": 33,
-        "methods": {"等价类": 12, "边界值": 10, "场景法": 3, "判定表": 2, "安全测试": 2, "性能测试": 4},
-        "categories": {"功能": 12, "异常": 11, "边界": 10},
+        "count": 31,
+        "methods": {"等价类": 12, "边界值": 10, "场景法": 3, "判定表": 2, "安全测试": 2, "性能测试": 2},
+        "categories": {"功能": 11, "异常": 8, "边界": 12},
     },
     "prd_login_full.md": {
-        "count": 27,
-        "methods": {"等价类": 12, "边界值": 10, "场景法": 3, "判定表": 2},
-        "categories": {"功能": 9, "异常": 8, "边界": 10},
+        "count": 31,
+        "methods": {"等价类": 12, "边界值": 14, "场景法": 3, "判定表": 2},
+        "categories": {"功能": 9, "异常": 8, "边界": 14},
     },
 }
 
@@ -242,36 +251,52 @@ class TestHardGate:
         assert [f.id for f in profile.frs] == ["FR-auto-1"]
         assert all(f.auto for f in profile.frs)
 
-    def test_gap_fr_backfilled_to_100(self):
-        """缺 FR 场景：补齐至 100% 才放行（构造 8 功能点，后 2 条走补齐）。"""
+    def test_gap_fr_registered_uncovered_not_watered(self):
+        """迭代 9 / UP-1：补不出具体用例的 FR → 不塞模板条目，登记未覆盖清单 + 具体设计建议；
+        产物无「系统接受有效输入并处理成功」类同义反复条目（DoD 1 注水清零）。"""
         text = "# 构造需求文档\n\n## 功能清单\n\n" + "".join(
             f"- 支持功能点{i}\n" for i in range(1, 9)
         )
         profile = prd_adapter.parse_text(text, source="gap.md")
         merged, report = reconcile_fr_coverage(profile, [])
-        assert report.summary_line().startswith("FR 覆盖率 100%")
-        for fr in profile.frs:
-            assert any(fr.tag in c.title for c in merged), fr.tag
+        # 覆盖率如实计算（0/8），禁用模板填塞
+        assert report.summary_line().startswith("FR 覆盖率 0%（0/8）")
+        assert report.filled_count == 0
+        assert len(report.uncovered_items) == 8
+        assert merged == [], "补不出具体用例时不得产出任何凑数条目"
+        # 未覆盖清单含具体设计建议（指向条款要素缺失，禁止空话）
+        for item in report.uncovered_items:
+            assert item.suggestion.startswith("建议"), item.fr_id
+            assert "支持功能点" in item.suggestion
+            assert "状态码" in item.suggestion or "阈值" in item.suggestion or "提示" in item.suggestion
+        # 同义反复模板清零：产物与状态均无「自动补齐」模板痕迹
+        for item in report.items:
+            assert "自动补齐" not in item.status
+            assert "系统接受有效输入并处理成功" not in item.suggestion
 
-    def test_backfill_failure_fails_generation(self, monkeypatch):
-        """补齐后仍缺覆盖 → 抛中文异常（生成失败，exit 1），不再仅警告。"""
+    def test_unregistered_gap_fails_generation(self, monkeypatch):
+        """零遗漏登记（迭代 9 / UP-1）：既无覆盖又登记不了未覆盖清单 → 抛中文异常（生成失败）。"""
         monkeypatch.setattr(
             "casepilot.core.generator._fr_backfill_cases", lambda fr, module: []
+        )
+        monkeypatch.setattr(
+            "casepilot.core.generator.build_design_suggestion", lambda fr: ""
         )
         text = "# 构造需求文档\n\n## 功能清单\n\n- 支持功能点甲\n"
         profile = prd_adapter.parse_text(text, source="gap.md")
         with pytest.raises(ValueError) as exc:
             reconcile_fr_coverage(profile, [])
         message = str(exc.value)
-        assert "FR 覆盖率不足 100%" in message
+        assert "零遗漏登记未满足" in message
         assert "生成失败" in message
 
-    def test_cli_gen_exit_1_on_coverage_failure(self, tmp_path, monkeypatch):
+    def test_cli_gen_exit_1_on_unregistered_gap(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "casepilot.core.generator._fr_backfill_cases", lambda fr, module: []
         )
-        # 8 个功能点超出规则引擎覆盖上限（MAX_FEATURES=6），后 2 条 FR 靠补齐；
-        # 补齐被置空后覆盖率不足 100% → 生成失败 exit 1
+        monkeypatch.setattr(
+            "casepilot.core.generator.build_design_suggestion", lambda fr: ""
+        )
         bad = tmp_path / "gap.md"
         bad.write_text(
             "# 构造需求文档\n\n## 功能清单\n\n"
@@ -280,7 +305,7 @@ class TestHardGate:
         )
         result = runner.invoke(app, ["gen", "-i", str(bad)])
         assert result.exit_code == 1
-        assert "FR 覆盖率不足 100%" in _combined(result)
+        assert "零遗漏登记未满足" in _combined(result)
 
     def test_cli_prints_fr_summary(self, tmp_path, offline_env):
         result = runner.invoke(

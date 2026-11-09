@@ -66,7 +66,7 @@ def build_markdown(cases: Iterable[TestCase], source: str = "") -> str:
                 case.expected,
                 case.priority,
                 case.category,
-                case.method,
+                f"{case.method}{'（设计假设）' if case.assumption else ''}",
                 case.module,
             )
             for name, value in zip(ELEMENT_ROWS, values):

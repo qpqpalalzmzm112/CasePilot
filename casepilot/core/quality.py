@@ -28,7 +28,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 from openpyxl import load_workbook
 
-from ..exporters.zentao_excel import ZENTAO_HEADERS
+from ..exporters.zentao_excel import ZENTAO_HEADERS, split_keyword
 from .schema import CATEGORIES, METHODS, FRItem, TestCase
 
 # 覆盖维度门禁下限（与 mock 引擎保持一致）
@@ -190,9 +190,66 @@ class ClarityReport:
         return not self.issues
 
 
+# 「」引文整体（条款原文逐字引用，引文内部不切分）
+_QUOTED_RE = re.compile(r"「[^」]*」")
+
+
+def strip_quotes(text: str) -> str:
+    """剥离「」逐字引文（迭代 9 / F4）：引文是 PRD 条款原文引用，
+    引文内的模糊词（真实 PRD 常含「或」）不算判定不确定。"""
+    return _QUOTED_RE.sub("", text)
+
+
+# 语义边界截断的边界字符（空格 / 标点，含引号起点）
+_SEM_BOUNDARY_CHARS = " 　，,。；;、：:！!？?（(【[「"
+
+
+def semantic_trim(text: str, limit: int = 30) -> str:
+    """语义边界截断（迭代 9 / F3）：超长时在空格 / 标点等语义边界截断，
+    绝不从数字或词语中间断开（不带省略号）。
+
+    「单笔转账金额超过 10000 元或当日累计转账达到 50000 元时」→
+    「单笔转账金额超过 10000 元或当日累计转账达到」（在空格边界截断，
+    不出现「元或当日累计转账达到 50000 元」类拦腰断片）。
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    # 1) 优先在空格 / 标点等语义边界截断；切点绝不落在数字 / 拉丁单元内
+    #    （「3 次」不得拆成「3」，迭代 9 / F3）
+    for i in range(len(window), 0, -1):
+        if window[i - 1] in _SEM_BOUNDARY_CHARS:
+            cut = i - 1
+            while cut > 0 and (
+                text[cut - 1].isdigit()
+                or (text[cut - 1].isascii() and text[cut - 1].isalnum())
+            ):
+                cut -= 1
+            trimmed = text[:cut].rstrip(" 　")
+            if trimmed:
+                return trimmed
+    # 2) 回退：绝不从数字 / 拉丁串中间断开
+    cut = limit
+    while cut > 0:
+        before = text[cut - 1]
+        after = text[cut] if cut < len(text) else ""
+        before_tok = before.isdigit() or (before.isascii() and before.isalnum())
+        after_tok = after.isdigit() or (after.isascii() and after.isalnum())
+        if not before_tok and not after_tok:
+            break
+        cut -= 1
+    return text[:cut].rstrip() or text[:limit]
+
+
 def find_fuzzy_words(text: str) -> list[str]:
-    """返回文本命中的模糊词（保持 FUZZY_WORDS 词表顺序，去重）。"""
-    return [w for w in FUZZY_WORDS if w in text]
+    """返回文本命中的模糊词（保持 FUZZY_WORDS 词表顺序，去重）。
+
+    迭代 9 / F4：「」逐字引文内的模糊词不算命中（与测量值预言的引文豁免一致），
+    只检查引文外的判定表述；judge 模糊词扣分同步豁免。
+    """
+    stripped = strip_quotes(text)
+    return [w for w in FUZZY_WORDS if w in stripped]
 
 
 def check_clarity(cases: Iterable[Union[TestCase, Mapping[str, Any]]]) -> ClarityReport:
@@ -281,6 +338,167 @@ def drop_fuzzy_cases(raw_cases: Sequence[Mapping[str, Any]]) -> tuple[list[dict]
 
 
 # ---------------------------------------------------------------------------
+# 弱断言禁令（迭代 9 / UP-3）：预期结果不得用「返回正常 / 处理成功」类
+# 无具体行为表述糊弄；生成侧命中即校验失败回灌重试，耗尽丢弃 + 中文告警，
+# judge 可执行性扣分并建议「写明具体验证点（状态码 / 字段值 / 提示文案 / 界面元素）」
+# ---------------------------------------------------------------------------
+
+# 弱断言短语（全项目唯一事实来源，judge 复用）：每词都是「无可验证行为」的空转表述。
+# 与模糊词词表 FUZZY_WORDS 互补：模糊词管「判定不确定」，弱断言管「判定不具体」。
+# 不误伤具体断言：「命中 0 次」「T0+604800」「≤2s」等带数值 / 判定符号的表述不含这些短语。
+WEAK_ASSERTION_PHRASES: tuple[str, ...] = (
+    "返回正常",
+    "正常返回",
+    "处理成功",
+    "正常工作",
+    "显示正确",
+    "接口请求返回正常",
+    "运行正常",
+    "功能正常",
+    "表现正常",
+    "结果正常",
+)
+
+# 同义反复（复述需求 / 条款而无可验证行为）判定短语（迭代 9 / UP-1 judge 规则）
+TAUTOLOGY_PHRASES: tuple[str, ...] = (
+    "处理成功",
+    "处理正确",
+    "接受有效输入",
+    "按条款处理",
+    "定义一致",
+    "符合预期",
+    "需求规则定义",
+    "结果正确",
+    "返回正常",
+    "正常返回",
+)
+
+# 语义类复述句式（迭代 9 / F1）：「复述条款 + 零可验证行为」的换皮模板整体命中。
+# 覆盖三类换皮：「系统接受有效等价类输入并成功执行…返回结果与…需求定义一致」、
+# 「系统按…需求规则接受有效输入并完成处理…返回结果与…规则定义一致」、
+# 「系统拒绝…无效等价类输入…返回结果与…拒绝定义一致」。
+_RESTATE_RE = re.compile(
+    r"接受有效[^；，]*输入"
+    r"|按[^；，]*需求规则"
+    r"|拒绝[^；，]*无效[^；，]*输入"
+    r"|拦截[^；，]*无效[^；，]*输入"
+    r"|返回结果与"
+    r"|定义一致"
+    r"|符合预期"
+    r"|按条款处理"
+    r"|处理正确"
+    r"|处理成功"
+    r"|成功执行"
+)
+
+# 死短语（迭代 9 / F6）：纯复述空话，不论句中其他内容是否含具体验证点，
+# 出现即判同义反复（OR 语义，不再走「有验证点就豁免」的 AND 判定）。
+# 「返回结果与…的需求定义一致」「…的规则定义一致」「…的拒绝定义一致」
+# 与「处理状态可逐项核对」三类本身就是同义反复，judge 必须无条件命中。
+HARD_TAUTOLOGY_PHRASES: tuple[str, ...] = (
+    "定义一致",        # 覆盖「需求/规则/拒绝/拦截…定义一致」全部变体
+    "状态可逐项核对",  # 覆盖「处理/拒绝/拦截状态可逐项核对」全部变体
+)
+
+# 具体可验证断言点（迭代 9 / F1）：HTTP 状态码 / 字段值 / 数值 / 提示文案 /
+# 界面元素 / 数据·状态变化 / 日志·流水记录。剥离「」引文后命中任一即不算同义反复。
+_CONCRETE_ANCHOR_RE = re.compile(
+    r"\d"
+    r"|≤|≥|<|>|＜|＞"
+    r"|状态码|字段|页面|按钮|文案|提示"
+    r"|数据|状态|写入|更新|生成|记录|流水|日志|金额|余额|次数"
+    r"|列表|弹窗|输入框|跳转|表格|邮件|短信|订单|库存"
+)
+
+
+@dataclass
+class WeakViolation:
+    """弱断言门禁违规明细：用例标题 + 命中短语。"""
+
+    title: str
+    phrases: list[str]
+
+
+def find_weak_assertions(text: str) -> list[str]:
+    """返回文本命中的弱断言短语（保持 WEAK_ASSERTION_PHRASES 词表顺序，去重）。"""
+    return [w for w in WEAK_ASSERTION_PHRASES if w in text]
+
+
+def find_tautologies(text: str) -> list[str]:
+    """返回文本中「同义复述条款、无可验证行为」的片段（迭代 9 / UP-1 + F1 + F6）。
+
+    判定（可解释、可单测）：
+    - F6 死短语 OR 语义：命中 HARD_TAUTOLOGY_PHRASES（「…定义一致」
+      「…状态可逐项核对」等纯复述空话）即判同义反复，不论句中其他内容是否
+      含具体验证点——这类短语本身就是复述条款，出现即扣分；
+    - 其余片段（F1 语义类）：剥离「」逐字引文后若不含任何具体可验证断言点
+      （状态码 / 字段值 / 数值 / 提示文案 / 界面元素 / 数据·状态变化 / 日志·流水），
+      且命中语义类复述句式（「系统接受有效…输入并成功执行…」等换皮模板）
+      或 TAUTOLOGY_PHRASES → 判同义反复。带具体验证点的引用式表述不误伤。
+    """
+    found: list[str] = []
+    for fragment in _split_fragments(text):
+        frag = fragment.strip()
+        if not frag:
+            continue
+        # F6：死短语出现即命中（OR），不看句中其余内容是否有验证点
+        if any(h in frag for h in HARD_TAUTOLOGY_PHRASES):
+            found.append(frag)
+            continue
+        stripped = strip_quotes(frag)
+        if _CONCRETE_ANCHOR_RE.search(stripped):
+            continue  # 剥离引文后仍有具体验证点，不算同义反复
+        if _RESTATE_RE.search(stripped) or any(p in stripped for p in TAUTOLOGY_PHRASES):
+            found.append(frag)
+    return found
+
+
+def check_weak_gate(cases: Iterable[Union[TestCase, Mapping[str, Any]]]) -> list[WeakViolation]:
+    """弱断言门禁（阻断接口）：expected 命中 WEAK_ASSERTION_PHRASES 即视为校验失败。
+
+    与模糊词门禁同口径同风格；供 LLM 生成链路在结构校验后执行——
+    命中即触发回灌重试（见 core/llm.py），mock 模式由模板保证 0 命中。
+    """
+    violations: list[WeakViolation] = []
+    for case in cases:
+        phrases = find_weak_assertions(_field(case, "expected"))
+        if phrases:
+            violations.append(
+                WeakViolation(title=_field(case, "title") or "（无标题）", phrases=phrases)
+            )
+    return violations
+
+
+def build_weak_feedback(violations: Sequence[WeakViolation]) -> str:
+    """构造回灌提示词的中文反馈（含用例标题与弱断言短语）。"""
+    parts = [
+        f"用例「{v.title}」预期结果含弱断言「{'」、「'.join(v.phrases)}」" for v in violations
+    ]
+    return (
+        "；".join(parts)
+        + "。弱断言无可验证行为，请写明具体验证点（状态码 / 字段值 / 提示文案 / 界面元素）"
+    )
+
+
+def drop_weak_cases(raw_cases: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list[str]]:
+    """重试耗尽后的兜底阻断：丢弃仍命中弱断言的用例，返回（保留用例, 中文告警明细）。"""
+    kept: list[dict] = []
+    warnings: list[str] = []
+    for case in raw_cases:
+        data = dict(case)
+        phrases = find_weak_assertions(_field(data, "expected"))
+        if phrases:
+            title = _field(data, "title") or "（无标题）"
+            warnings.append(
+                f"弱断言禁令丢弃用例「{title}」：预期结果含弱断言「{'」、「'.join(phrases)}」，"
+                "请写明具体验证点（状态码 / 字段值 / 提示文案 / 界面元素），已从用例集中移除"
+            )
+        else:
+            kept.append(data)
+    return kept, warnings
+
+
+# ---------------------------------------------------------------------------
 # 测量值预言禁令（迭代 8 / UP-2）：预期结果禁止预言实测值形态
 # ---------------------------------------------------------------------------
 
@@ -306,6 +524,19 @@ class MeasurementViolation:
     phrases: list[str]
 
 
+def _quoted_spans(text: str) -> list[tuple[int, int]]:
+    """「」引文区间（条款原文引用整体，迭代 9：引文内的指标词不算测量值预言）。"""
+    spans: list[tuple[int, int]] = []
+    start: Optional[int] = None
+    for i, ch in enumerate(text):
+        if ch == "「":
+            start = i
+        elif ch == "」" and start is not None:
+            spans.append((start, i + 1))
+            start = None
+    return spans
+
+
 def find_measurement_predictions(text: str, source_pairs: Optional[set] = None) -> list[str]:
     """返回文本中「预言实测值形态」的片段（测量名词 + 无判定标准限定的数值）。
 
@@ -313,10 +544,17 @@ def find_measurement_predictions(text: str, source_pairs: Optional[set] = None) 
     - 测量名词（响应时间 / 错误率 / 吞吐 等）到数值之间出现判定标准限定词
       （≤ / ≥ / 不超过 / 至少 / 以内 等）→ 判定标准形态，放行；
     - 数值在 PRD 原文有据（source_pairs 按（数值, 单位）对校验，±1 推导豁免）→ 放行；
+    - 「」引文是 PRD 条款原文引用（迭代 9），引文内的指标词不构成预言，跳过；
     - 其余（如「平均响应时间为 1.8 秒」「错误率为 0.05%」「吞吐达到 1200」）→ 实测值预言。
     """
     found: list[str] = []
+    spans = _quoted_spans(text)
     for noun in _MEASUREMENT_NOUN_RE.finditer(text):
+        if any(s <= noun.start() < e for s, e in spans):
+            continue  # 条款原文引用内的指标词不算预言
+        before = text[: noun.start()].rstrip()
+        if before and before[-1].isdigit():
+            continue  # 数值单位形态（如 100 QPS / 99QPS）：实测值标注而非预言
         window = text[noun.end(): noun.end() + _MEAS_WINDOW]
         value_match = re.search(r"\d+(?:\.\d+)?", window)
         if value_match is None:
@@ -399,8 +637,8 @@ def drop_measurement_cases(
 # 步骤与预期的关键断言必须有 PRD 依据
 # ---------------------------------------------------------------------------
 
-# 数字单位（与 adapters/prd.py 的边界量词保持一致）
-_UNIT_PATTERN = r"位|次|分钟|小时|秒|天|件|元|个|岁|字符|张|条|笔|分|%|％|并发|QPS|qps"
+# 数字单位（与 adapters/prd.py 的边界量词保持一致；万台/台=设备容量，迭代 9）
+_UNIT_PATTERN = r"位|次|分钟|小时|秒|天|件|元|个|岁|字符|张|条|笔|分|%|％|并发|QPS|qps|万台|台"
 # 数值 + 单位断言对：如 30 分钟 / 8 位
 _NUM_UNIT_RE = re.compile(rf"(\d+(?:\.\d+)?)\s*({_UNIT_PATTERN})")
 # 区间：如 8-20 位（两端都是断言值）
@@ -410,6 +648,9 @@ _BARE_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 # 时间复合形态（迭代 8）：「29 分 59 秒」归一为总秒数「1799 秒」参与依据判定，
 # 与「30 分钟（1800 秒）」类换算表述互通（「分钟」不在此列，防止误吞）
 _TIME_COMPOUND_RE = re.compile(r"(\d+)\s*分(?!\s*钟)\s*(\d+)\s*秒")
+# 时间点形态（迭代 9 / UP-3）：「07:00」归一为距 00:00 的分钟数（420 分钟，单位「时点」），
+# 相邻分钟（06:59 / 07:01）按边界 ±1 推导豁免互通
+_TIMEPOINT_TOKEN_RE = re.compile(r"(\d{1,2})[:：](\d{2})")
 # 时间单位 → 秒数换算（跨单位等价判定用）
 _TIME_UNIT_SECONDS: dict[str, float] = {
     "秒": 1.0, "秒钟": 1.0, "分": 60.0, "分钟": 60.0, "小时": 3600.0, "天": 86400.0,
@@ -465,8 +706,22 @@ _DERIVATION_WORDS: tuple[str, ...] = (
     "输入", "输出", "提交", "执行", "观察", "准备", "调整", "核对", "记录",
     "测试", "数据", "操作", "处理", "校验", "通过", "请求", "响应", "返回",
     "结果", "系统", "状态", "步骤", "条款", "定义", "一致",
+    "时点", "时刻", "对照点", "观察点", "分别",
 )
 _DERIV_SPLIT_RE = re.compile("|".join(map(re.escape, _DERIVATION_WORDS)))
+
+# 边界 / 时点 ±1 推导语境标记（迭代 9 / F5）：「（少 1）」「（多 1）」
+# 「（切换时刻前 / 后 / 整）」「（目标规模）」「（恰好达到…）」等括号推导注记
+# 是测试设计的合法推导（与数值 ±1 豁免同一口径），不是工程行为假设——
+# 不因实词命中不足而打「（设计假设）」；PRD 未定义的工程行为（限流降级类）
+# 不含此类推导注记，仍按 [假设] 标注。
+_DERIVATION_CONTEXT_RE = re.compile(
+    r"（[^）]*(?:少\s*1|多\s*1|切换时刻|时刻前|时刻后|时刻整|目标规模|判定标准|"
+    r"恰好达到|边界|相邻值|对照点|观察点)[^）]*）"
+    r"|核对[^。；]*结果"
+    r"|观察[^。；]*结果"
+    r"|记录[^。；]*结果"
+)
 
 # 虚词 / 语法粘连字：剔除推导词后仅剩这些字的碎片（如「并被」「时被」）
 # 属语法连接，不构成规则断言，不参与依据判定
@@ -489,6 +744,12 @@ def extract_numeric_tokens(text: str) -> set[tuple[float, str]]:
             lambda m: f"{int(m.group(1)) * 60 + int(m.group(2))} 秒", line
         )
         occupied: list[tuple[int, int]] = []
+        for m in _TIMEPOINT_TOKEN_RE.finditer(line):
+            hour, minute = int(m.group(1)), int(m.group(2))
+            if hour > 23 or minute > 59:
+                continue
+            tokens.add((float(hour * 60 + minute), "时点"))
+            occupied.append((m.start(), m.end()))
         for m in _RANGE_RE.finditer(line):
             tokens.add((float(m.group(1)), m.group(3)))
             tokens.add((float(m.group(2)), m.group(3)))
@@ -783,10 +1044,13 @@ def check_grounding(
                 )
                 case_kinds.append(KIND_CONTRACT)
                 continue
-            # 1) 数字 / 阈值断言：数值 + 单位对须有 PRD 依据（±1 推导豁免）
+            # 1) 数字 / 阈值断言：数值 + 单位对须有 PRD 依据（±1 推导豁免）；
+            # 边界 / 时点 ±1 推导括号注记内的数字（「（少 1）」
+            # 「（切换时刻前 1 分钟）」）是测试推导值（迭代 9 / F5），
+            # 先剥离推导注记再判定，避免时点 ±1 推导被误打「（设计假设）」
             bad_nums = [
                 (value, unit)
-                for value, unit in extract_numeric_tokens(frag)
+                for value, unit in extract_numeric_tokens(_DERIVATION_CONTEXT_RE.sub("", frag))
                 if unit and not _numeric_grounded(value, unit, source_pairs)
             ]
             if bad_nums:
@@ -806,6 +1070,12 @@ def check_grounding(
                     )
                 )
                 case_kinds.append(KIND_NUMERIC)
+                continue
+            # 1.5) 测试推导豁免（迭代 9 / F5）：边界 / 时点 ±1 推导语境
+            # （「（少 1）」「（切换时刻前）」「（目标规模）」等括号注记）是测试
+            # 设计的合法推导，不是工程行为假设；数值已全部有据时不再按实词命中
+            # 判推测项，避免时点 ±1（06:59 / 07:01）被误打「（设计假设）」
+            if _DERIVATION_CONTEXT_RE.search(frag):
                 continue
             # 2) 动作 / 后果断言：实词命中 ≥2 个算有依据
             tokens = _content_tokens(frag)
@@ -963,11 +1233,14 @@ def validate_zentao_excel(path: Union[str, Path]) -> ZentaoImportReport:
                 f"第 {row_no} 行「用例类型」取值「{str(values[6]).strip()}」不在常用枚举"
                 f"（{'/'.join(CATEGORIES)}）内，禅道中需自定义类型映射"
             )
-        if _is_nonempty(values[7]) and str(values[7]).strip() not in METHODS:
-            report.warnings.append(
-                f"第 {row_no} 行「关键词」取值「{str(values[7]).strip()}」不在方法论枚举"
-                f"（{'/'.join(METHODS)}）内，方法论标注可能丢失"
-            )
+        if _is_nonempty(values[7]):
+            # 「,假设」标注（迭代 9 / UP-2）不算方法论枚举外取值，先剥除再校验
+            keyword, _assumed = split_keyword(str(values[7]))
+            if keyword not in METHODS:
+                report.warnings.append(
+                    f"第 {row_no} 行「关键词」取值「{str(values[7]).strip()}」不在方法论枚举"
+                    f"（{'/'.join(METHODS)}）内，方法论标注可能丢失"
+                )
 
     report.checked_rows = data_rows
     if data_rows == 0 and not header_problems:

@@ -333,9 +333,9 @@ FR 覆盖率 100%（9/9），其中自动补齐 3 条 FR（新增 6 条用例）
 | `examples/prd_login.md` | 中文登录需求：验证码、连续错误 5 次锁定 30 分钟、密码 8-20 位等边界 | 27 条，method 4 种 / category 3 种 |
 | `examples/openapi_petstore.yaml` | OpenAPI 3.0 petstore：`/pet`、`/pet/{petId}`、`/store/order`、`/user`，含 schema 约束 | 30 条，method 4 种 / category 4 种 |
 | `examples/prd_boundary.md` | 纯边界值场景：优惠券满 100 减 20、单次最多 50 件等大量数字边界 | 25 条，method 4 种 / category 3 种 |
-| `examples/prd_security_perf.md` | 安全 + 性能需求（迭代 6 新增）：防 SQL 注入、敏感信息脱敏、越权拦截、接口响应时间 ≤2 秒、支持 50 并发、≥100 QPS | 35 条，安全测试 18 条 / 性能测试 12 条（FR 关联安全 / 性能用例标注率 100%） |
-| `examples/prd_numbered.md` | 带原文编号的 FR / NFR 分层需求（迭代 7 新增）：FR-1.x / FR-2.x 促销与核销规则、NFR-1.x 性能与锁定约束 | 33 条，标题 [FR-1.1] / [NFR-1.3] 标签与原文编号 100% 逐字一致，NFR 全部覆盖入表 |
-| `examples/prd_login_full.md` | 模拟真实 PRD 的回归 fixture（迭代 8 新增）：FR-1.3 记住密码、FR-3 忘记密码整块（单级编号）、FR-4.3 设备挤下线、NFR 时间偏差 5 分钟，单级 + 多级编号混排、含加粗 / 括号上下文 | 27 条，6 编号全部逐字抽取零 FR-auto，核对表 100%（条款 → 用例编号映射），产出 4 类已验证好用例模式（回归锁） |
+| `examples/prd_security_perf.md` | 安全 + 性能需求（迭代 6 新增）：防 SQL 注入、敏感信息脱敏、越权拦截、接口响应时间 ≤2 秒、支持 50 并发、≥100 QPS | 31 条，安全测试 18 条 / 性能测试 8 条（FR 关联安全 / 性能用例标注率 100%） |
+| `examples/prd_numbered.md` | 带原文编号的 FR / NFR 分层需求（迭代 7 新增）：FR-1.x / FR-2.x 促销与核销规则、NFR-1.x 性能与锁定约束 | 31 条，标题 [FR-1.1] / [NFR-1.3] 标签与原文编号 100% 逐字一致，NFR 全部覆盖入表 |
+| `examples/prd_login_full.md` | 模拟真实 PRD 的回归 fixture（迭代 8 新增）：FR-1.3 记住密码、FR-3 忘记密码整块（单级编号）、FR-4.3 设备挤下线、NFR 时间偏差 5 分钟，单级 + 多级编号混排、含加粗 / 括号上下文 | 31 条，6 编号全部逐字抽取零 FR-auto，核对表 100%（条款 → 用例编号映射），产出 4 类已验证好用例模式（回归锁） |
 
 六个样例均可无 key、无 Ollama 的纯离线环境跑通，生成结果结构合法率 100%；
 等价类 / 场景法用例预期结果引用输入具体词或数值的比例为 **100%**（实测，≥80% 门禁，见 `tests/test_mock_concrete.py`）；
@@ -395,6 +395,8 @@ $ casepilot judge output/bad_cases.xlsx --source examples/prd_numbered.md --stri
 ```
 
 ## 效果实测与演示（迭代 4）
+
+> 真实 PRD 横向泛化实测数据（单文档四轮迭代 / 跨域泛化 / 质量门禁收敛时间线）见 **[evals/回归基线.md](evals/回归基线.md)**。
 
 ### 效果对比表（mock 模式生成质量量化）
 

@@ -44,6 +44,10 @@ class TestCase(BaseModel):
     category: Category = Field(..., description="用例类型：功能/接口/异常/边界")
     method: Method = Field(..., description="测试方法论：等价类/边界值/场景法/判定表")
     module: str = Field(..., min_length=1, description="所属模块，父模块/子模块 路径")
+    assumption: bool = Field(
+        False,
+        description="True=衍生 / 假设类用例（断言超出 PRD 条款依据），关键词列标注「,假设」（迭代 9 / UP-2）",
+    )
 
     @field_validator("title", "precondition", "steps", "expected", "module")
     @classmethod
@@ -76,6 +80,7 @@ class Feature(BaseModel):
     description: str = Field("", description="补充描述")
     kind: Literal["function", "api"] = Field("function", description="function=功能点，api=接口")
     section: str = Field("", description="所在小节标题（供安全 / 性能类需求的语境判定）")
+    section_path: str = Field("", description="所在小节层级路径（「父章节/子章节」，不含文档标题层）")
 
 
 class Boundary(BaseModel):
@@ -84,12 +89,15 @@ class Boundary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(..., min_length=1, description="边界出现的原文片段")
-    value: float = Field(..., description="边界数值")
-    kind: Literal["range_min", "range_max", "threshold"] = Field(
-        "threshold", description="range_min/range_max=区间端点，threshold=阈值"
+    value: float = Field(..., description="边界数值（timepoint=距 00:00 的分钟数）")
+    kind: Literal["range_min", "range_max", "threshold", "timepoint"] = Field(
+        "threshold", description="range_min/range_max=区间端点，threshold=阈值，timepoint=时间点切换边界"
     )
-    unit: str = Field("", description="数值单位（位/次/分钟/件 等）")
+    unit: str = Field("", description="数值单位（位/次/分钟/件 等；timepoint 固定「时点」）")
     section: str = Field("", description="所在小节标题（供安全 / 性能类需求的语境判定）")
+    clause: str = Field(
+        "", description="边界所在条款原文行（同条款多阈值成组选取，迭代 9 / UP-3 多阈值边界完整性）"
+    )
 
 
 class FRItem(BaseModel):
@@ -105,6 +113,9 @@ class FRItem(BaseModel):
     id: str = Field(..., min_length=1, description="需求编号，逐字保留原文（如 FR-1.1 / NFR-1.2 / 需求3）")
     text: str = Field(..., min_length=1, description="需求条目原文（追溯与覆盖核对依据）")
     section: str = Field("", description="所在小节标题（供安全 / 性能类需求的语境判定）")
+    section_path: str = Field(
+        "", description="所在小节层级路径（「父章节/子章节」，不含文档标题层，迭代 9 / UP-1 模块路径修 bug）"
+    )
     auto: bool = Field(False, description="True=原文无编号时的自动编号兜底（FR-auto-N）")
 
     @property
