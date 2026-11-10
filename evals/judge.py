@@ -470,12 +470,17 @@ def llm_review(
     model_note: Optional[str] = None,
     grounding: Optional[GroundingReport] = None,
 ) -> JudgeReport:
-    """LLM 逐条评审打分（temperature=0、JSON 输出，解析失败自动重试 ≤2 次）。"""
+    """LLM 逐条评审打分（temperature=0、JSON 输出，解析失败自动重试 ≤2 次）。
+
+    迭代 10 / UP-4 模型分级：终审用独立模型变量 CASEPILOT_JUDGE_MODEL
+    （未设置时回退 CASEPILOT_LLM_MODEL），运行日志明示当前评审模型。
+    """
     system = JUDGE_SYSTEM_PROMPT
     user = build_judge_prompt(cases)
     base_url = llm_gateway.get_base_url("openai" if llm_gateway.get_api_key() else "ollama")
     api_key = llm_gateway.get_api_key()
-    model = llm_gateway.get_model("openai" if api_key else "ollama")
+    model = llm_gateway.get_judge_model("openai" if api_key else "ollama")
+    logger.info("当前评审模型：%s", model)
 
     max_retries = llm_gateway.get_max_retries()
     last_error: Optional[ValueError] = None

@@ -190,14 +190,81 @@ class ClarityReport:
         return not self.issues
 
 
-# 「」引文整体（条款原文逐字引用，引文内部不切分）
-_QUOTED_RE = re.compile(r"「[^」]*」")
+# 全部引号形态（迭代 10 / UP-3 引文豁免校准）：「」『』""''（含直 / 弯引号），
+# 引文是 PRD 条款 / 提示原文逐字引用，引文内的模糊词不算判定不确定
+_QUOTE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("「", "」"),
+    ("『", "』"),
+    ("“", "”"),
+    ("‘", "’"),
+    ('"', '"'),
+    ("'", "'"),
+)
+_QUOTE_OPENERS = {o: c for o, c in _QUOTE_PAIRS}
+
+# 无引号的提示原文引用（迭代 10 / UP-3）：「提示 / 文案 / 显示 / 报错为 / 提示语为」
+# 等提示动词后至标点 / 句尾的片段按提示原文豁免——真实 PRD 的提示语常含「或」
+# （如「用户名或密码错误」），逐字引用后不判模糊词（登录 6 条误报根治）
+_PROMPT_VERB_RE = re.compile(
+    r"提示语为|提示文案为|提示语|提示文案|提示为|文案为|显示为|报错为|提示|文案|显示|报错"
+)
+# 提示原文片段终点：标点 / 句尾
+_PROMPT_END_CHARS = "，,。；;、：:！!？?\n"
+
+
+def quote_spans(text: str) -> list[tuple[int, int]]:
+    """全部引号形态（「」『』""''）成对引文的区间（「」支持嵌套）。"""
+    spans: list[tuple[int, int]] = []
+    stack: list[tuple[str, int]] = []
+    for i, ch in enumerate(text):
+        if stack and ch == stack[-1][0]:
+            _, start = stack.pop()
+            spans.append((start, i + 1))
+        elif ch in _QUOTE_OPENERS:
+            stack.append((_QUOTE_OPENERS[ch], i))
+    return spans
+
+
+def prompt_quote_spans(text: str) -> list[tuple[int, int]]:
+    """无引号提示原文引用的区间（迭代 10 / UP-3）：提示动词后至标点 / 句尾的片段。"""
+    spans: list[tuple[int, int]] = []
+    for m in _PROMPT_VERB_RE.finditer(text):
+        end = m.end()
+        while end < len(text) and text[end] not in _PROMPT_END_CHARS:
+            end += 1
+        if end > m.end():
+            spans.append((m.end(), end))
+    return spans
+
+
+def _merge_spans(spans: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    """区间按起点排序并合并重叠部分（确定性）。"""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def quote_exempt_spans(text: str) -> list[tuple[int, int]]:
+    """模糊词 / 测量值预言的引文豁免区间：全部引号形态 + 无引号提示原文引用。"""
+    return _merge_spans(quote_spans(text) + prompt_quote_spans(text))
 
 
 def strip_quotes(text: str) -> str:
-    """剥离「」逐字引文（迭代 9 / F4）：引文是 PRD 条款原文引用，
-    引文内的模糊词（真实 PRD 常含「或」）不算判定不确定。"""
-    return _QUOTED_RE.sub("", text)
+    """剥离逐字引文与提示原文引用（迭代 9 / F4，迭代 10 / UP-3 校准）：
+    「」『』""'' 全部引号形态与提示动词后的提示原文片段，都是 PRD 条款 / 提示原文
+    逐字引用，引文内的模糊词（真实 PRD 常含「或」）不算判定不确定；
+    只检查引文外的判定表述。"""
+    out: list[str] = []
+    prev = 0
+    for start, end in quote_exempt_spans(text):
+        out.append(text[prev:start])
+        prev = end
+    out.append(text[prev:])
+    return "".join(out)
 
 
 # 语义边界截断的边界字符（空格 / 标点，含引号起点）
@@ -245,8 +312,10 @@ def semantic_trim(text: str, limit: int = 30) -> str:
 def find_fuzzy_words(text: str) -> list[str]:
     """返回文本命中的模糊词（保持 FUZZY_WORDS 词表顺序，去重）。
 
-    迭代 9 / F4：「」逐字引文内的模糊词不算命中（与测量值预言的引文豁免一致），
-    只检查引文外的判定表述；judge 模糊词扣分同步豁免。
+    迭代 9 / F4：逐字引文内的模糊词不算命中（与测量值预言的引文豁免一致）；
+    迭代 10 / UP-3 引文豁免校准：豁免扩展到「」『』""'' 全部引号形态与
+    无引号提示原文引用（提示动词后至标点 / 句尾），只检查引文外的判定表述；
+    judge 模糊词扣分同步豁免。
     """
     stripped = strip_quotes(text)
     return [w for w in FUZZY_WORDS if w in stripped]
@@ -524,19 +593,6 @@ class MeasurementViolation:
     phrases: list[str]
 
 
-def _quoted_spans(text: str) -> list[tuple[int, int]]:
-    """「」引文区间（条款原文引用整体，迭代 9：引文内的指标词不算测量值预言）。"""
-    spans: list[tuple[int, int]] = []
-    start: Optional[int] = None
-    for i, ch in enumerate(text):
-        if ch == "「":
-            start = i
-        elif ch == "」" and start is not None:
-            spans.append((start, i + 1))
-            start = None
-    return spans
-
-
 def find_measurement_predictions(text: str, source_pairs: Optional[set] = None) -> list[str]:
     """返回文本中「预言实测值形态」的片段（测量名词 + 无判定标准限定的数值）。
 
@@ -544,11 +600,12 @@ def find_measurement_predictions(text: str, source_pairs: Optional[set] = None) 
     - 测量名词（响应时间 / 错误率 / 吞吐 等）到数值之间出现判定标准限定词
       （≤ / ≥ / 不超过 / 至少 / 以内 等）→ 判定标准形态，放行；
     - 数值在 PRD 原文有据（source_pairs 按（数值, 单位）对校验，±1 推导豁免）→ 放行；
-    - 「」引文是 PRD 条款原文引用（迭代 9），引文内的指标词不构成预言，跳过；
+    - 逐字引文是 PRD 条款 / 提示原文引用（迭代 9，迭代 10 / UP-3 扩展到全部
+      引号形态与提示原文片段），引文内的指标词不构成预言，跳过；
     - 其余（如「平均响应时间为 1.8 秒」「错误率为 0.05%」「吞吐达到 1200」）→ 实测值预言。
     """
     found: list[str] = []
-    spans = _quoted_spans(text)
+    spans = quote_exempt_spans(text)
     for noun in _MEASUREMENT_NOUN_RE.finditer(text):
         if any(s <= noun.start() < e for s, e in spans):
             continue  # 条款原文引用内的指标词不算预言

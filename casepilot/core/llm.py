@@ -70,6 +70,15 @@ def get_model(mode: LLMMode) -> str:
     return DEFAULT_OLLAMA_MODEL if mode == "ollama" else DEFAULT_OPENAI_MODEL
 
 
+def get_judge_model(mode: LLMMode) -> str:
+    """judge 终审模型（迭代 10 / UP-4 模型分级）：CASEPILOT_JUDGE_MODEL 独立生效，
+    未设置时回退 CASEPILOT_LLM_MODEL / 各模式默认模型（其余模式决策逻辑不变）。"""
+    override = os.environ.get("CASEPILOT_JUDGE_MODEL")
+    if override:
+        return override
+    return get_model(mode)
+
+
 def get_max_retries() -> int:
     """解析失败自动重试次数，可用 CASEPILOT_LLM_MAX_RETRIES 覆盖（默认 2，非法值回落默认）。"""
     raw = os.environ.get("CASEPILOT_LLM_MAX_RETRIES", "").strip()

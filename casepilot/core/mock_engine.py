@@ -90,7 +90,13 @@ def classify_requirement(text: str, section: str = "") -> Optional[str]:
 
 
 def _fmt_num(value: float) -> str:
-    """把数值格式化为整洁的中文文本（整数不带小数点）。"""
+    """把数值格式化为整洁的中文文本（整数不带小数点）。
+
+    迭代 10 修 bug：整数不再走 `:g`（6 位有效数字会把 1000001 截断成 1e+06），
+    大整数边界两侧相邻值（999999 / 1000000 / 1000001）逐字精确展示。
+    """
+    if float(value).is_integer():
+        return str(int(value))
     return f"{value:g}"
 
 

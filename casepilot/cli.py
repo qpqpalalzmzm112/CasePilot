@@ -1,10 +1,11 @@
 """CasePilot 命令行入口（typer）。
 
 本迭代提供：
-- casepilot gen -i <文件> [--emit xlsx|pytest|md] [-o 输出路径]：PRD / OpenAPI 通用生成入口
+- casepilot gen -i <文件> [--emit xlsx|pytest|md] [-o 输出路径] [--only FR-3,…]：PRD / OpenAPI 通用生成入口
 - casepilot api -i <openapi> [--emit xlsx|pytest|md] [-o 输出路径]：OpenAPI 专用生成入口
 - casepilot eval -i <文件> [--golden <golden.json>]：评测生成质量（4 维评分，报告落盘 output/）
 - casepilot judge <cases.xlsx> [--source <prd.md>] [--strict] [-o 报告.md]：LLM-as-a-Judge 用例质量自评（双模式，--source 启用幻觉溯源校验，--strict 删除推测项用例）
+- casepilot doctor <cases.xlsx|cases.md> [--source <prd.md>] [--llm-review]：本地质检（默认零 LLM 调用，中文报告按阻断项 / 警告 / 提示分节，有阻断项 exit 1）
 - casepilot --version：显示版本号
 
 导出格式：
@@ -12,6 +13,8 @@
 - pytest：pytest 脚本骨架（可被 pytest 正常收集）
 - md：Markdown 用例表（按模块分组 + 方法论统计）
 
+迭代 10 / UP-2：gen 支持 --only 增量生成（只重新生成指定 FR 的用例，与上次生成
+结果缓存合并后整体导出），解析结果按输入内容 hash 缓存在 output/.cache/。
 运行时打印中文进度、覆盖维度检查结果与当前 LLM 模式；--help 全中文。
 """
 
@@ -28,6 +31,8 @@ from evals.judge import judge_cases, load_cases_from_excel, run_grounding_check
 from evals.run import run_eval
 
 from . import __version__
+from .adapters import prd as prd_adapter
+from .core import doctor as doctor_core
 from .core.generator import detect_source_type, generate_from_file
 from .core.llm import MODE_DESCRIPTIONS
 from .core.quality import KIND_MEASUREMENT, validate_zentao_excel
@@ -112,8 +117,14 @@ def _resolve_output(input_path: Path, emit: str, output: Optional[Path]) -> Path
     return Path("output") / f"{input_path.stem}{_DEFAULT_SUFFIXES[emit]}"
 
 
-def _run_generate(input_path: Path, emit: str, output: Optional[Path], openapi_only: bool) -> None:
-    """生成 + 按格式导出的公共编排（gen / api 共用）。"""
+def _run_generate(
+    input_path: Path,
+    emit: str,
+    output: Optional[Path],
+    openapi_only: bool,
+    only: Optional[str] = None,
+) -> None:
+    """生成 + 按格式导出的公共编排（gen / api 共用）；only 非空时走增量生成（UP-2）。"""
     _ensure_log_handler()
 
     if emit not in SUPPORTED_EMITS:
@@ -133,9 +144,10 @@ def _run_generate(input_path: Path, emit: str, output: Optional[Path], openapi_o
             pass  # 无法识别的扩展名交由后续生成流程报错（保持迭代 1 错误文案）
 
     out_path = _resolve_output(input_path, emit, output)
+    only_ids = [s.strip() for s in only.split(",") if s.strip()] if only else None
 
     try:
-        result = generate_from_file(input_path)
+        result = generate_from_file(input_path, only=only_ids)
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"错误：{exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -156,9 +168,11 @@ def _run_generate(input_path: Path, emit: str, output: Optional[Path], openapi_o
         saved = export_markdown(result.cases, out_path, source=str(input_path))
         typer.echo(f"导出完成：{saved}（共 {len(result.cases)} 条用例）")
 
-    # FR 对账核对表摘要（迭代 8 / UP-1）：CLI 结束打印覆盖率总结句
+    # FR 对账核对表摘要（迭代 8 / UP-1）：CLI 结束打印覆盖率总结句；
+    # --only 增量生成时改打增量合并摘要（迭代 10 / UP-2）
     if result.fr_coverage_summary:
-        typer.echo(f"FR 对账摘要：{result.fr_coverage_summary}")
+        label = "增量生成摘要" if only_ids else "FR 对账摘要"
+        typer.echo(f"{label}：{result.fr_coverage_summary}")
 
 
 @app.command("gen", cls=_ChineseHelpCommand)
@@ -181,9 +195,15 @@ def gen(
         "--output",
         help="输出文件路径，默认 output/<输入名>_cases.xlsx（pytest/md 格式见 --help）",
     ),
+    only: Optional[str] = typer.Option(
+        None,
+        "--only",
+        help="增量生成（迭代 10 / UP-2）：仅重新生成指定需求编号归属的用例"
+        "（支持 FR-3 / FR-3.1 / NFR-1.2，多值逗号分隔），与上次生成结果缓存合并后整体导出",
+    ),
 ) -> None:
     """解析需求文档并生成测试用例（禅道 Excel / pytest 骨架 / Markdown）。"""
-    _run_generate(input, emit, output, openapi_only=False)
+    _run_generate(input, emit, output, openapi_only=False, only=only)
 
 
 @app.command("api", cls=_ChineseHelpCommand)
@@ -288,6 +308,61 @@ def judge(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
         typer.echo(f"\n评审报告已保存：{output}")
+
+
+@app.command("doctor", cls=_ChineseHelpCommand)
+def doctor_cmd(
+    cases: Path = typer.Argument(
+        ...,
+        help="用例文件路径：禅道格式 Excel（*_cases.xlsx）或 Markdown 用例表（*_cases.md）",
+    ),
+    source: Optional[Path] = typer.Option(
+        None,
+        "--source",
+        help="PRD 原文路径：启用编号引用一致性比对（[FR-x] 标签与原文编号逐字比对）与测量值数值依据核对",
+    ),
+    llm_review: bool = typer.Option(
+        False,
+        "--llm-review",
+        help="把本地判定为可疑的条目送 LLM 复核（有 API key 才生效，无 key 跳过并中文提示）；默认纯本地零 LLM 调用",
+    ),
+) -> None:
+    """本地质检（迭代 10 / UP-1）：纯本地规则质检用例文件，中文报告按阻断项 / 警告 / 提示分节。
+
+    检查项：模糊词（含引文豁免）/ 弱断言 / 同义反复死短语 / 测量值预言 / 契约发明 /
+    编号引用一致性（需 --source）/ 边界成对性。默认零 LLM 调用、零 token；
+    退出码：有阻断项 exit 1，仅警告 / 全过 exit 0。
+    """
+    _ensure_log_handler()
+    try:
+        rows = doctor_core.load_cases(cases)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    source_text = ""
+    source_frs: list = []
+    source_name = ""
+    if source is not None:
+        try:
+            source_text = source.read_text(encoding="utf-8")
+            source_frs = list(prd_adapter.parse_text(source_text, source=str(source)).frs)
+            source_name = str(source)
+        except (ValueError, FileNotFoundError) as exc:
+            typer.echo(f"错误：{exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    report = doctor_core.run_local_checks(
+        rows, source_text=source_text, source_frs=source_frs, source_name=source_name
+    )
+    report.source_file = str(cases)
+    if llm_review:
+        # 只把本地可疑条目（阻断项 + 警告）送 LLM 复核，结论合并进报告
+        suspicious = [f for f in report.findings if f.severity in (doctor_core.SEVERITY_BLOCK, doctor_core.SEVERITY_WARN)]
+        report.llm_conclusions = doctor_core.run_llm_review(suspicious)
+    typer.echo(report.format_report())
+    if report.has_blockers:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
