@@ -174,6 +174,7 @@ xlsx 导出后 CLI 自动执行**导入前校验**并输出中文报告（对照
 | `OPENAI_API_KEY` | API 密钥（兼容） | 无 |
 | `CASEPILOT_LLM_BASE_URL` | OpenAI 兼容接口地址 | `https://api.openai.com/v1`（ollama 模式为 `http://localhost:11434/v1`） |
 | `CASEPILOT_LLM_MODEL` | 模型名 | `gpt-4o-mini`（ollama 模式为 `qwen2.5`） |
+| `CASEPILOT_JUDGE_MODEL` | judge 终审专用模型（迭代 10 模型分级，未设置时回退 `CASEPILOT_LLM_MODEL`） | 无（回退 `CASEPILOT_LLM_MODEL`） |
 | `CASEPILOT_LLM_MAX_RETRIES` | LLM 输出解析 / 校验失败自动重试次数 | `2` |
 
 > 密钥只从环境变量读取，任何文件、日志与提交中都不存在硬编码密钥。
@@ -188,6 +189,7 @@ DeepSeek 提供 OpenAI 兼容接口，三步接入：
 CASEPILOT_LLM_API_KEY=sk-你的key
 CASEPILOT_LLM_BASE_URL=https://api.deepseek.com/v1
 CASEPILOT_LLM_MODEL=deepseek-flash    # 或 deepseek-v4-pro（质量更强）
+CASEPILOT_JUDGE_MODEL=deepseek-v4-pro # 可选：judge 终审用更强模型（未设置回退 CASEPILOT_LLM_MODEL）
 ```
 
 2. 每次使用前把配置注入当前终端会话（Windows PowerShell，项目根目录下）：

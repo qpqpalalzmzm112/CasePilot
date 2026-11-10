@@ -7,16 +7,22 @@
 迭代 8 对账硬门禁（UP-1）：覆盖率强制 100%——补齐后仍缺任一 FR/NFR 即抛中文
 异常使生成失败（exit 1）；覆盖率核对表升级为「PRD 条款 → 用例编号」映射
 （编号 | 原文摘要 | 覆盖用例编号列表 | ✓/已补齐）。
+迭代 10 / UP-2 解析缓存 + 增量生成：PRD 解析结果按输入内容 hash 落盘
+output/.cache/<hash>.json，输入未变时跳过重新解析（日志明示「读取解析缓存」），
+输入变更自动失效；`--only FR-3`（多值逗号分隔）只重新生成指定 FR 归属用例，
+与已有用例集（上次生成结果缓存 <hash>_cases.json）合并后整体导出。
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 from ..adapters import openapi as openapi_adapter
 from ..adapters import prd as prd_adapter
@@ -66,6 +72,126 @@ def parse_document(path: Union[str, Path], source_type: Optional[SourceType] = N
     if kind == "prd":
         return prd_adapter.parse_text(p.read_text(encoding="utf-8"), source=str(p))
     return openapi_adapter.parse_file(p)
+
+
+# ---------------------------------------------------------------------------
+# 解析缓存 + 用例集缓存（迭代 10 / UP-2）：output/.cache/ 下按输入内容 hash 落盘
+# ---------------------------------------------------------------------------
+
+# 缓存目录（output/ 已被 .gitignore 忽略，缓存与增量产物均不入库）
+CACHE_DIR = Path(FR_REPORT_DIR) / ".cache"
+# 解析缓存文件名 = <输入文件内容 hash>.json（迭代 10 / UP-2）
+PARSE_CACHE_SUFFIX = ".json"
+# 用例集缓存（上次生成结果缓存，增量生成的合并基线）= <hash>_cases.json
+CASES_CACHE_SUFFIX = "_cases.json"
+# 缓存结构版本（结构变更时递增，旧缓存自动失效）
+CACHE_VERSION = 1
+
+
+def input_content_hash(path: Union[str, Path]) -> str:
+    """输入文件内容的 sha256 哈希：解析缓存 / 用例集缓存的键，输入变更自动失效。"""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _cache_file(digest: str, suffix: str) -> Path:
+    """按内容 hash 拼缓存文件路径。"""
+    return CACHE_DIR / f"{digest}{suffix}"
+
+
+def _read_cache_json(cache: Path, digest: str) -> Optional[dict]:
+    """读取缓存 JSON 并校验版本与内容 hash；不合法（损坏 / hash 不匹配）返回 None。"""
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("version") != CACHE_VERSION or data.get("source_hash") != digest:
+        return None
+    return data
+
+
+def load_parse_cache(digest: str) -> Optional[DocumentProfile]:
+    """读取解析缓存（输入内容未变时跳过重新解析）；无有效缓存返回 None。"""
+    cache = _cache_file(digest, PARSE_CACHE_SUFFIX)
+    if not cache.is_file():
+        logger.info("解析缓存未命中，执行解析：%s", cache)
+        return None
+    data = _read_cache_json(cache, digest)
+    if data is None:
+        logger.info("解析缓存失效（内容 hash 不匹配或缓存损坏），重新解析：%s", cache)
+        return None
+    try:
+        profile = DocumentProfile.model_validate(data["profile"])
+    except Exception:  # noqa: BLE001 - 缓存结构损坏统一按失效处理
+        logger.info("解析缓存失效（缓存结构损坏），重新解析：%s", cache)
+        return None
+    logger.info("读取解析缓存：%s（输入内容未变更，跳过重新解析）", cache)
+    return profile
+
+
+def save_parse_cache(digest: str, profile: DocumentProfile) -> Path:
+    """把解析结果落盘 JSON（output/.cache/<输入文件内容 hash>.json）。"""
+    cache = _cache_file(digest, PARSE_CACHE_SUFFIX)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps(
+            {"version": CACHE_VERSION, "source_hash": digest, "profile": profile.model_dump(mode="json")},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return cache
+
+
+def parse_document_cached(path: Union[str, Path], source_type: Optional[SourceType] = None) -> DocumentProfile:
+    """解析输入文档（带解析缓存，迭代 10 / UP-2）。
+
+    输入内容未变时直接读 output/.cache/<内容 hash>.json（日志明示「读取解析缓存」）；
+    输入变更（内容 hash 不匹配）自动失效并重新解析、刷新缓存。
+    """
+    p = Path(path)
+    digest = input_content_hash(p)
+    profile = load_parse_cache(digest)
+    if profile is not None:
+        return profile
+    profile = parse_document(p, source_type)
+    save_parse_cache(digest, profile)
+    return profile
+
+
+def load_case_cache(digest: str) -> Optional[list[TestCase]]:
+    """读取上次生成结果缓存（增量生成的合并基线）；无有效缓存返回 None。"""
+    cache = _cache_file(digest, CASES_CACHE_SUFFIX)
+    if not cache.is_file():
+        return None
+    data = _read_cache_json(cache, digest)
+    if data is None:
+        logger.info("用例集缓存失效（内容 hash 不匹配或缓存损坏），按无缓存处理：%s", cache)
+        return None
+    try:
+        return [TestCase.model_validate(c) for c in data["cases"]]
+    except Exception:  # noqa: BLE001 - 缓存结构损坏统一按失效处理
+        logger.info("用例集缓存失效（缓存结构损坏），按无缓存处理：%s", cache)
+        return None
+
+
+def save_case_cache(digest: str, cases: Sequence[TestCase]) -> Path:
+    """把生成 / 合并后的用例集落盘（上次生成结果缓存，供 --only 增量合并）。"""
+    cache = _cache_file(digest, CASES_CACHE_SUFFIX)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps(
+            {
+                "version": CACHE_VERSION,
+                "source_hash": digest,
+                "cases": [c.model_dump(mode="json") for c in cases],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return cache
 
 
 # ---------------------------------------------------------------------------
@@ -456,17 +582,77 @@ def format_fr_coverage_report(report: FRCoverageReport) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# 增量生成（迭代 10 / UP-2）：--only 指定 FR 重新生成 + 与已有用例集合并
+# ---------------------------------------------------------------------------
+
+
+def resolve_only_targets(profile: DocumentProfile, only: Sequence[str]) -> list[FRItem]:
+    """把 --only 需求编号（FR-3 / FR-3.1 / NFR-1.2，多值逗号分隔）解析为 FR 条目。
+
+    编号与 PRD 原文编号逐字比对；任一编号不存在即抛中文错误并列出可选编号。
+    """
+    wanted: list[str] = []
+    for item in only:
+        wanted.extend(s.strip() for s in str(item).split(",") if s.strip())
+    by_id = {fr.id: fr for fr in profile.frs}
+    unknown = [w for w in wanted if w not in by_id]
+    if unknown:
+        raise ValueError(
+            f"增量生成指定的需求编号不存在：{'、'.join(unknown)}"
+            f"（可选编号：{'、'.join(by_id) or '无'}，支持 FR-3 / FR-3.1 / NFR-1.2 多值逗号分隔）"
+        )
+    return [by_id[w] for w in dict.fromkeys(wanted)]
+
+
+def merge_incremental_cases(
+    cached: Sequence[TestCase], generated: Sequence[TestCase], targets: Sequence[FRItem]
+) -> tuple[list[TestCase], list[TestCase]]:
+    """增量合并（迭代 10 / UP-2）：已有用例集中剔除目标 FR 归属用例，
+    替换为本次重新生成的目标 FR 归属用例；未归属任何目标 FR 的用例原样保留。
+
+    返回（合并后用例集, 本次重新生成的目标 FR 用例）。归属判定与 FR 对账同口径
+    （_case_covers_fr：[FR-x] 追溯前缀或引用条款原文）。
+    """
+
+    def belongs(case: TestCase) -> bool:
+        return any(_case_covers_fr(case, fr) for fr in targets)
+
+    kept = [c for c in cached if not belongs(c)]
+    fresh = [c for c in generated if belongs(c)]
+    return kept + fresh, fresh
+
+
 def generate_from_file(
-    path: Union[str, Path], mode: Optional[LLMMode] = None
+    path: Union[str, Path],
+    mode: Optional[LLMMode] = None,
+    only: Optional[Sequence[str]] = None,
 ) -> GenerationResult:
-    """端到端生成：文件 → 用例集（全部经 pydantic 校验）。"""
+    """端到端生成：文件 → 用例集（全部经 pydantic 校验）。
+
+    迭代 10 / UP-2：
+    - 解析缓存：输入内容未变时读取 output/.cache/<内容 hash>.json 跳过重新解析
+      （日志明示「读取解析缓存」），输入变更自动失效；
+    - 增量生成（only 非空）：只重新生成指定 FR 归属的用例，与已有用例集
+      （上次生成结果缓存）合并后整体返回；等价性硬要求——同一输入下逐条
+      --only 触发并合并 == 整份生成的用例集（内容一致、顺序允许不同）；
+    - 未指定 only 时行为与迭代 9 完全一致（含 FR 对账报告落盘）。
+    """
     p = Path(path)
+    digest = input_content_hash(p)
     logger.info("正在解析输入文档：%s", p)
-    profile = parse_document(p)
+    profile = load_parse_cache(digest)
+    if profile is None:
+        profile = parse_document(p)
+        save_parse_cache(digest, profile)
     logger.info(
         "解析完成：模块「%s」，功能点 / 接口 %d 个，数字边界 %d 个，主流程步骤 %d 步",
         profile.module, len(profile.features), len(profile.boundaries), len(profile.flows),
     )
+
+    targets: list[FRItem] = []
+    if only:
+        targets = resolve_only_targets(profile, only)
 
     gateway = LLMGateway(mode=mode)
     raw_cases = gateway.generate_raw_cases(profile)
@@ -488,7 +674,7 @@ def generate_from_file(
     # FR 需求对账（迭代 6 / UP-1）：逐条覆盖核对 + 具体化补齐 + 报告打印落盘
     cases, fr_report = reconcile_fr_coverage(profile, cases)
     fr_summary = ""
-    if fr_report is not None:
+    if fr_report is not None and not targets:
         text = format_fr_coverage_report(fr_report)
         for line in text.splitlines():
             logger.info(line)
@@ -504,9 +690,40 @@ def generate_from_file(
     # 有据（回归断言保证），不会命中；LLM 模式产出的衍生用例借此显式标注
     cases = _tag_assumption_cases(cases, p.read_text(encoding="utf-8"), profile)
 
+    if not targets:
+        # 完整生成：用例集缓存即「上次生成结果缓存」（增量生成的合并基线）
+        save_case_cache(digest, cases)
+        return GenerationResult(
+            source=str(p),
+            cases=cases,
+            mode=gateway.mode,
+            generated_at=datetime.now(),
+            fr_coverage_summary=fr_summary,
+        )
+
+    # 增量生成（迭代 10 / UP-2）：只重新生成指定 FR 归属用例，与已有用例集合并
+    cached = load_case_cache(digest)
+    if not cached:
+        logger.warning(
+            "未找到上次生成结果缓存（%s），本次仅导出指定 FR 的用例；"
+            "先执行一次完整生成即可合并整份用例集",
+            _cache_file(digest, CASES_CACHE_SUFFIX),
+        )
+    merged, fresh = merge_incremental_cases(cached or [], cases, targets)
+    if not merged:
+        raise ValueError(
+            f"增量生成结果为空：{'、'.join(fr.id for fr in targets)} 未产出任何用例，"
+            "无可导出内容（请确认指定的需求编号含可验证要素）"
+        )
+    save_case_cache(digest, merged)
+    fr_summary = (
+        f"增量生成：已重新生成 {'、'.join(fr.id for fr in targets)} 归属用例 {len(fresh)} 条，"
+        f"与已有用例集合并后共 {len(merged)} 条"
+    )
+    logger.info(fr_summary)
     return GenerationResult(
         source=str(p),
-        cases=cases,
+        cases=merged,
         mode=gateway.mode,
         generated_at=datetime.now(),
         fr_coverage_summary=fr_summary,

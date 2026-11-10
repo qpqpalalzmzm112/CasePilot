@@ -21,6 +21,7 @@ def offline_env(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CASEPILOT_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("CASEPILOT_LLM_MODEL", raising=False)
+    monkeypatch.delenv("CASEPILOT_JUDGE_MODEL", raising=False)
     monkeypatch.setattr("casepilot.core.llm.probe_ollama", lambda *args, **kwargs: False)
 
 
